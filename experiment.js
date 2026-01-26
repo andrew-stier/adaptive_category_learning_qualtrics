@@ -489,6 +489,12 @@ function selectNextTransferItem() {
         available = allItems; // Fallback if all maxed out
     }
 
+    // Prevent back-to-back repetition: exclude the last shown item
+    const lastItem = ExperimentState.lastTransferItem;
+    if (lastItem && available.length > 1) {
+        available = available.filter(id => id !== lastItem);
+    }
+
     let bestItem = available[0];
     let bestIG = -Infinity;
 
@@ -500,6 +506,7 @@ function selectNextTransferItem() {
         }
     }
 
+    ExperimentState.lastTransferItem = bestItem;
     const count = presentationCounts[bestItem] + 1;
     console.log(`[CategoryLearning] Selected ${bestItem} (presentation #${count}) with info gain ${bestIG.toFixed(6)}`);
     return bestItem;
@@ -731,6 +738,12 @@ function selectNextTrainingItem() {
         available = allItems;
     }
 
+    // Prevent back-to-back repetition: exclude the last shown item
+    const lastItem = ExperimentState.lastTrainingItem;
+    if (lastItem && available.length > 1) {
+        available = available.filter(id => id !== lastItem);
+    }
+
     // Select based on information gain
     let bestItem = available[0];
     let bestIG = -Infinity;
@@ -744,6 +757,7 @@ function selectNextTrainingItem() {
     }
 
     blockCounts[bestItem]++;
+    ExperimentState.lastTrainingItem = bestItem;
     console.log(`[CategoryLearning] Adaptive training: selected ${bestItem} with info gain ${bestIG.toFixed(6)}`);
     return bestItem;
 }
@@ -1266,6 +1280,7 @@ async function initializeExperiment(phase) {
     if (phase === "transfer") {
         ExperimentState.shownTransferItems = [];
         ExperimentState.transferData = [];
+        ExperimentState.lastTransferItem = null;
     } else if (phase === "training") {
         ExperimentState.trainingData = [];
         ExperimentState.blockNum = 0;
@@ -1275,6 +1290,7 @@ async function initializeExperiment(phase) {
         ExperimentState.totalCorrect = 0;
         ExperimentState.currentBlockSequence = null;
         ExperimentState.blockItemCounts = {};
+        ExperimentState.lastTrainingItem = null;
     }
 
     // Initialize alpha belief for adaptive selection (needed for both training and transfer)
