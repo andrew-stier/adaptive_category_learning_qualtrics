@@ -67,7 +67,7 @@ const CONFIG = {
         stimulusDuration: null,           // null = until response
         maxResponseTime: 5000,            // ms before timeout
         breakBetweenBlocks: true,         // Show break screen between blocks
-        adaptiveSelection: true,          // Use adaptive stimulus selection
+        adaptiveSelection: false,         // Use random stimulus selection for training
         warmupBlocks: 3,                  // Random selection for first N blocks before adaptive kicks in
     },
 
