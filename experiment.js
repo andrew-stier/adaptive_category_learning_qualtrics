@@ -67,6 +67,8 @@ const CONFIG = {
         stimulusDuration: null,           // null = until response
         maxResponseTime: 5000,            // ms before timeout
         breakBetweenBlocks: true,         // Show break screen between blocks
+        adaptiveSelection: true,          // Use adaptive stimulus selection
+        warmupBlocks: 3,                  // Random selection for first N blocks before adaptive kicks in
     },
 
     // Transfer parameters
@@ -438,25 +440,37 @@ function selectNextTransferItem() {
     const tables = ExperimentState.lookupTables;
     const shown = new Set(ExperimentState.shownTransferItems);
 
-    // Get all available transfer items (not yet shown in this cycle)
-    let available = tables.transfer_items
-        .map(item => item.id)
-        .filter(id => !shown.has(id));
-
-    // If all items shown, reset and allow repeats (adaptive selection will pick best)
-    if (available.length === 0) {
-        console.log('[CategoryLearning] All transfer items shown, starting new cycle');
-        // Reset shown items but keep track for data
-        ExperimentState.shownTransferItems = [];
-        available = tables.transfer_items.map(item => item.id);
-    }
+    // Get all transfer items
+    const allItems = tables.transfer_items.map(item => item.id);
 
     if (!CONFIG.transfer.adaptiveSelection) {
-        // Random selection
+        // Random selection without replacement until all shown, then reset
+        let available = allItems.filter(id => !shown.has(id));
+        if (available.length === 0) {
+            console.log('[CategoryLearning] All transfer items shown, resetting');
+            ExperimentState.shownTransferItems = [];
+            available = allItems;
+        }
         return available[Math.floor(Math.random() * available.length)];
     }
 
     // Adaptive selection: choose item with highest information gain
+    // Allow any item to be selected, but track presentation counts
+    const presentationCounts = {};
+    for (const id of allItems) {
+        presentationCounts[id] = ExperimentState.transferTrialData.filter(t => t.itemId === id).length;
+    }
+
+    // Find max presentations to ensure some balance (no item shown more than 2x the minimum)
+    const minCount = Math.min(...Object.values(presentationCounts));
+    const maxAllowed = minCount + 3; // Allow up to 3 more presentations than the least-shown item
+
+    // Filter items that haven't exceeded max presentations
+    let available = allItems.filter(id => presentationCounts[id] < maxAllowed);
+    if (available.length === 0) {
+        available = allItems; // Fallback if all maxed out
+    }
+
     let bestItem = available[0];
     let bestIG = -Infinity;
 
@@ -468,7 +482,8 @@ function selectNextTransferItem() {
         }
     }
 
-    console.log(`[CategoryLearning] Selected ${bestItem} with info gain ${bestIG.toFixed(6)}`);
+    const count = presentationCounts[bestItem] + 1;
+    console.log(`[CategoryLearning] Selected ${bestItem} (presentation #${count}) with info gain ${bestIG.toFixed(6)}`);
     return bestItem;
 }
 
@@ -635,9 +650,64 @@ function updateProgress() {
 // ============================================================================
 
 function getTrainingTrialSequence() {
-    // Create a block of trials with each training item appearing once
+    // Create a block of trials with each training item appearing once (random order)
     const trainingIds = ExperimentState.lookupTables.training_items.map(item => item.id);
     return shuffleArray(trainingIds);
+}
+
+function selectNextTrainingItem() {
+    // Select next training item - random during warmup, adaptive after
+    const tables = ExperimentState.lookupTables;
+    const allItems = tables.training_items.map(item => item.id);
+
+    // Check if still in warmup period (blockNum is 0-indexed, so warmupBlocks=3 means blocks 0,1,2 are warmup)
+    const currentBlock = ExperimentState.blockNum;
+    const useAdaptive = CONFIG.training.adaptiveSelection && currentBlock >= CONFIG.training.warmupBlocks;
+
+    if (!useAdaptive) {
+        // Random selection from current block sequence
+        if (!ExperimentState.currentBlockSequence || ExperimentState.currentBlockSequence.length === 0) {
+            ExperimentState.currentBlockSequence = getTrainingTrialSequence();
+        }
+        return ExperimentState.currentBlockSequence.shift();
+    }
+
+    // Adaptive selection: choose item with highest information gain
+    // Track how many times each item has been shown this block
+    if (!ExperimentState.blockItemCounts) {
+        ExperimentState.blockItemCounts = {};
+    }
+
+    // Count presentations this block
+    const blockCounts = ExperimentState.blockItemCounts;
+    for (const id of allItems) {
+        if (blockCounts[id] === undefined) blockCounts[id] = 0;
+    }
+
+    // Ensure some balance within block (no item more than 2 ahead of others)
+    const minCount = Math.min(...Object.values(blockCounts));
+    const maxAllowed = minCount + 2;
+
+    let available = allItems.filter(id => blockCounts[id] < maxAllowed);
+    if (available.length === 0) {
+        available = allItems;
+    }
+
+    // Select based on information gain
+    let bestItem = available[0];
+    let bestIG = -Infinity;
+
+    for (const itemId of available) {
+        const ig = computeInformationGain(itemId);
+        if (ig > bestIG) {
+            bestIG = ig;
+            bestItem = itemId;
+        }
+    }
+
+    blockCounts[bestItem]++;
+    console.log(`[CategoryLearning] Adaptive training: selected ${bestItem} with info gain ${bestIG.toFixed(6)}`);
+    return bestItem;
 }
 
 function runTrainingTrial() {
@@ -649,12 +719,8 @@ function runTrainingTrial() {
         return;
     }
 
-    // Get next stimulus
-    if (!ExperimentState.currentBlockSequence || ExperimentState.currentBlockSequence.length === 0) {
-        ExperimentState.currentBlockSequence = getTrainingTrialSequence();
-    }
-
-    const itemId = ExperimentState.currentBlockSequence.shift();
+    // Get next stimulus (random or adaptive depending on warmup)
+    const itemId = selectNextTrainingItem();
     const item = ExperimentState.lookupTables.training_items.find(t => t.id === itemId);
 
     // Show stimulus and wait for response
@@ -740,6 +806,12 @@ function endTrainingBlock() {
     ExperimentState.blockTrials = 0;
     ExperimentState.blockCorrect = 0;
     ExperimentState.currentBlockSequence = null;
+    ExperimentState.blockItemCounts = {}; // Reset for adaptive selection
+
+    // Log when adaptive selection kicks in
+    if (CONFIG.training.adaptiveSelection && ExperimentState.blockNum === CONFIG.training.warmupBlocks) {
+        console.log(`[CategoryLearning] Warmup complete - switching to adaptive stimulus selection`);
+    }
 
     // Show break screen or continue immediately
     if (CONFIG.training.breakBetweenBlocks) {
@@ -876,38 +948,61 @@ function endTransferPhase() {
         container.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h2>Transfer phase complete!</h2><p>Please wait...</p></div>';
     }
 
-    // Click next button - try multiple methods
+    // Click next button - try multiple methods with verification
     setTimeout(function() {
         console.log('[CategoryLearning] Attempting to advance to next page...');
 
-        // Method 1: Use stored question context
-        if (ExperimentState.questionContext && typeof ExperimentState.questionContext.clickNextButton === 'function') {
-            console.log('[CategoryLearning] Using questionContext.clickNextButton()');
-            ExperimentState.questionContext.clickNextButton();
-            return;
-        }
+        // Helper to check if page navigation started
+        var navigationAttempted = false;
 
-        // Method 2: Try NextButton by ID
+        // Method 1: Try NextButton by ID first (more reliable than questionContext)
         var nextBtn = document.getElementById('NextButton');
         if (nextBtn) {
-            console.log('[CategoryLearning] Clicking NextButton by ID');
+            console.log('[CategoryLearning] Found NextButton, making visible and clicking');
             nextBtn.style.display = 'block';
+            nextBtn.style.visibility = 'visible';
+            nextBtn.disabled = false;
             nextBtn.click();
-            return;
+            navigationAttempted = true;
+        }
+
+        // Method 2: If NextButton not found, try questionContext
+        if (!navigationAttempted && ExperimentState.questionContext && typeof ExperimentState.questionContext.clickNextButton === 'function') {
+            console.log('[CategoryLearning] Using questionContext.clickNextButton()');
+            try {
+                ExperimentState.questionContext.clickNextButton();
+                navigationAttempted = true;
+            } catch (e) {
+                console.log('[CategoryLearning] questionContext.clickNextButton() failed:', e);
+            }
         }
 
         // Method 3: Try finding any next/submit button
-        var buttons = document.querySelectorAll('input[type="submit"], button[id*="Next"], input[id*="Next"]');
-        if (buttons.length > 0) {
-            console.log('[CategoryLearning] Clicking found button:', buttons[0]);
-            buttons[0].click();
-            return;
+        if (!navigationAttempted) {
+            var buttons = document.querySelectorAll('input[type="submit"], button[id*="Next"], input[id*="Next"]');
+            if (buttons.length > 0) {
+                console.log('[CategoryLearning] Clicking found button:', buttons[0]);
+                buttons[0].click();
+                navigationAttempted = true;
+            }
         }
 
-        console.log('[CategoryLearning] Could not find next button - showing manual instructions');
-        if (container) {
-            container.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h2>Transfer phase complete!</h2><p>Please click the Next button below to continue.</p></div>';
+        // If nothing worked, show manual instructions and make button visible
+        if (!navigationAttempted) {
+            console.log('[CategoryLearning] Could not find next button - showing manual instructions');
         }
+
+        // Always show a message and try to expose the next button
+        if (container) {
+            container.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h2>Transfer phase complete!</h2><p>Click the Next button below to continue.</p></div>';
+        }
+
+        // Force-show any hidden next buttons as fallback
+        var allNextButtons = document.querySelectorAll('[id*="Next"], [class*="Next"], input[type="submit"]');
+        allNextButtons.forEach(function(btn) {
+            btn.style.display = 'inline-block';
+            btn.style.visibility = 'visible';
+        });
     }, 500);
 }
 
