@@ -52,8 +52,8 @@ const CONFIG = {
 
     // Key bindings
     keys: {
-        categoryA: "f",  // Press F for Category A
-        categoryB: "j"   // Press J for Category B
+        categoryA: "e",  // Press E for Category A
+        categoryB: "i"   // Press I for Category B
     },
 
     // Training parameters
@@ -978,11 +978,15 @@ function startTrials() {
     document.getElementById('stimulus-container').style.display = 'flex';
     document.getElementById('key-reminder').style.display = 'flex';
 
-    if (ExperimentState.phase === "training") {
-        runTrainingTrial();
-    } else {
-        runTransferTrial();
-    }
+    // Show fixation cross first, then start trial
+    showFixation();
+    setTimeout(() => {
+        if (ExperimentState.phase === "training") {
+            runTrainingTrial();
+        } else {
+            runTransferTrial();
+        }
+    }, CONFIG.training.itiDuration);
 }
 
 // ============================================================================
