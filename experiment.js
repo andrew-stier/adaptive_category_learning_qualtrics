@@ -1099,6 +1099,16 @@ function initCategoryLearning(phase, questionContext) {
         const container = questionContext.getQuestionContainer();
         console.log('[CategoryLearning] Got question container:', container);
 
+        // Set background color to match stimulus images
+        const bgColor = '#F5F5F5';
+        container.style.backgroundColor = bgColor;
+        if (typeof jQuery !== 'undefined') {
+            jQuery('.SkinInner').css('background-color', bgColor);
+            jQuery('.Skin').css('background-color', bgColor);
+            jQuery('body').css('background-color', bgColor);
+        }
+        document.body.style.backgroundColor = bgColor;
+
         // Hide the default question content
         const inner = container.querySelector('.Inner');
         if (inner) {
@@ -1113,6 +1123,7 @@ function initCategoryLearning(phase, questionContext) {
             expDiv.id = 'category-learning-container';
             expDiv.style.width = '100%';
             expDiv.style.minHeight = '400px';
+            expDiv.style.backgroundColor = bgColor;
             container.appendChild(expDiv);
             console.log('[CategoryLearning] Created experiment container div');
         }
