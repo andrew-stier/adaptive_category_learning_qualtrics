@@ -458,7 +458,7 @@ function selectNextTransferItem() {
     // Allow any item to be selected, but track presentation counts
     const presentationCounts = {};
     for (const id of allItems) {
-        presentationCounts[id] = ExperimentState.transferTrialData.filter(t => t.itemId === id).length;
+        presentationCounts[id] = ExperimentState.transferData.filter(t => t.itemId === id).length;
     }
 
     // Find max presentations to ensure some balance (no item shown more than 2x the minimum)
