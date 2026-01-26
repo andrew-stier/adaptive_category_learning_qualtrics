@@ -39,12 +39,12 @@ const CONFIG = {
     stimulusExtension: ".png",
 
     // Feature dimension names (for display/logging only)
-    featureNames: ["Size", "Color", "Shape", "Pattern"],
+    featureNames: ["Body", "Antenna", "Eyes", "Pattern"],
 
     // Feature value labels (for display/logging only)
     featureValues: {
-        0: ["Small", "Blue", "Square", "Plain"],   // When feature = 0
-        1: ["Large", "Red", "Round", "Striped"]    // When feature = 1
+        0: ["Round", "Single", "One", "Solid"],    // When feature = 0
+        1: ["Tall", "Double", "Two", "Spotted"]    // When feature = 1
     },
 
     // Category labels shown to participants (will be counterbalanced)
@@ -631,6 +631,8 @@ function getTrainingTrialSequence() {
 }
 
 function runTrainingTrial() {
+    console.log('[CategoryLearning] Running training trial', ExperimentState.trialNum + 1);
+
     // Check if block is complete
     if (ExperimentState.blockTrials >= CONFIG.training.trialsPerBlock) {
         endTrainingBlock();
@@ -733,7 +735,7 @@ function endTrainingBlock() {
 function endTrainingPhase(reason) {
     const finalAccuracy = ExperimentState.totalCorrect / ExperimentState.trialNum;
 
-    console.log(`Training complete: ${reason}, accuracy: ${(finalAccuracy * 100).toFixed(1)}%`);
+    console.log(`[CategoryLearning] Training complete: ${reason}, accuracy: ${(finalAccuracy * 100).toFixed(1)}%`);
 
     // Save training data to Qualtrics
     saveTrainingData(finalAccuracy, reason);
@@ -741,8 +743,17 @@ function endTrainingPhase(reason) {
     // Signal completion to Qualtrics
     if (typeof Qualtrics !== 'undefined') {
         Qualtrics.SurveyEngine.setEmbeddedData('training_accuracy', finalAccuracy);
-        document.getElementById('NextButton').click();
     }
+
+    // Click next button - use stored context if available
+    setTimeout(function() {
+        if (ExperimentState.questionContext && typeof ExperimentState.questionContext.clickNextButton === 'function') {
+            ExperimentState.questionContext.clickNextButton();
+        } else {
+            var nextBtn = document.getElementById('NextButton');
+            if (nextBtn) nextBtn.click();
+        }
+    }, 100);
 }
 
 // ============================================================================
@@ -815,7 +826,7 @@ function handleTransferResponse(itemId, response, rt) {
 function endTransferPhase() {
     const alphaEstimate = estimateAlpha();
 
-    console.log(`Transfer complete. Alpha estimate: ${alphaEstimate.expectedValue.toFixed(2)}`);
+    console.log(`[CategoryLearning] Transfer complete. Alpha estimate: ${alphaEstimate.expectedValue.toFixed(2)}`);
 
     // Save transfer data to Qualtrics
     saveTransferData(alphaEstimate);
@@ -824,8 +835,17 @@ function endTransferPhase() {
     if (typeof Qualtrics !== 'undefined') {
         Qualtrics.SurveyEngine.setEmbeddedData('alpha_estimate', alphaEstimate.expectedValue);
         Qualtrics.SurveyEngine.setEmbeddedData('experiment_complete', 1);
-        document.getElementById('NextButton').click();
     }
+
+    // Click next button - use stored context if available
+    setTimeout(function() {
+        if (ExperimentState.questionContext && typeof ExperimentState.questionContext.clickNextButton === 'function') {
+            ExperimentState.questionContext.clickNextButton();
+        } else {
+            var nextBtn = document.getElementById('NextButton');
+            if (nextBtn) nextBtn.click();
+        }
+    }, 100);
 }
 
 // ============================================================================
@@ -907,21 +927,30 @@ function setupKeyHandler() {
 // ============================================================================
 
 async function loadLookupTables() {
+    console.log('[CategoryLearning] Loading lookup tables...');
+
     if (LOOKUP_TABLES) {
+        console.log('[CategoryLearning] Using embedded lookup tables');
         return LOOKUP_TABLES;
     }
 
+    console.log('[CategoryLearning] Fetching from:', LOOKUP_TABLES_URL);
     try {
         const response = await fetch(LOOKUP_TABLES_URL);
-        return await response.json();
+        if (!response.ok) {
+            throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
+        }
+        const tables = await response.json();
+        console.log('[CategoryLearning] Lookup tables loaded successfully');
+        return tables;
     } catch (error) {
-        console.error("Failed to load lookup tables:", error);
-        throw error;
+        console.error("[CategoryLearning] Failed to load lookup tables:", error);
+        throw new Error("Failed to load experiment data: " + error.message);
     }
 }
 
 async function initializeExperiment(phase) {
-    console.log(`Initializing ${phase} phase...`);
+    console.log(`[CategoryLearning] Initializing ${phase} phase...`);
 
     // Load lookup tables
     ExperimentState.lookupTables = await loadLookupTables();
@@ -946,7 +975,7 @@ async function initializeExperiment(phase) {
     // Generate counterbalancing (only once, on training phase)
     if (phase === "training" || !ExperimentState.counterbalance) {
         ExperimentState.counterbalance = generateCounterbalance(ExperimentState.participantId);
-        console.log("Counterbalance condition:", ExperimentState.counterbalance.conditionCode);
+        console.log("[CategoryLearning] Counterbalance condition:", ExperimentState.counterbalance.conditionCode);
     }
 
     // Set phase
@@ -957,16 +986,31 @@ async function initializeExperiment(phase) {
         initializeAlphaBelief();
     }
 
-    // Create experiment HTML
-    const container = document.querySelector('.QuestionBody') || document.body;
-    container.innerHTML = createExperimentHTML();
+    // Create experiment HTML in the appropriate container
+    const container = ExperimentState.containerElement ||
+                      document.querySelector('.QuestionBody') ||
+                      document.querySelector('#category-learning-container') ||
+                      document.body;
+    console.log('[CategoryLearning] Using container:', container);
+    const html = createExperimentHTML();
+    console.log('[CategoryLearning] Created HTML, length:', html.length);
+    container.innerHTML = html;
+    console.log('[CategoryLearning] Experiment HTML inserted into DOM');
 
     // Set up key handler
     setupKeyHandler();
 
     // Hide Qualtrics next button during experiment
-    if (typeof Qualtrics !== 'undefined') {
-        document.getElementById('NextButton').style.display = 'none';
+    // Use the question context method if available, otherwise try direct DOM
+    if (ExperimentState.questionContext && typeof ExperimentState.questionContext.hideNextButton === 'function') {
+        ExperimentState.questionContext.hideNextButton();
+        console.log('[CategoryLearning] Hid next button via questionContext');
+    } else {
+        var nextBtn = document.getElementById('NextButton');
+        if (nextBtn) {
+            nextBtn.style.display = 'none';
+            console.log('[CategoryLearning] Hid next button via DOM');
+        }
     }
 
     // Start first trial
@@ -984,20 +1028,65 @@ async function initializeExperiment(phase) {
 // ============================================================================
 
 // This function should be called from Qualtrics question JavaScript
-// For Training question: initCategoryLearning("training")
-// For Transfer question: initCategoryLearning("transfer")
+// For Training question: initCategoryLearning("training", questionContext)
+// For Transfer question: initCategoryLearning("transfer", questionContext)
 
-function initCategoryLearning(phase) {
-    if (typeof Qualtrics !== 'undefined') {
-        Qualtrics.SurveyEngine.addOnload(function() {
-            initializeExperiment(phase);
-        });
+function initCategoryLearning(phase, questionContext) {
+    console.log(`[CategoryLearning] Initializing ${phase} phase...`);
+
+    // Store question context for later use (clicking next button, etc.)
+    ExperimentState.questionContext = questionContext;
+
+    // If we have a Qualtrics question context, set up the container properly
+    if (questionContext && typeof questionContext.getQuestionContainer === 'function') {
+        const container = questionContext.getQuestionContainer();
+        console.log('[CategoryLearning] Got question container:', container);
+
+        // Hide the default question content
+        const inner = container.querySelector('.Inner');
+        if (inner) {
+            inner.style.display = 'none';
+            console.log('[CategoryLearning] Hid .Inner element');
+        }
+
+        // Create a div for our experiment
+        let expDiv = container.querySelector('#category-learning-container');
+        if (!expDiv) {
+            expDiv = document.createElement('div');
+            expDiv.id = 'category-learning-container';
+            expDiv.style.width = '100%';
+            expDiv.style.minHeight = '400px';
+            container.appendChild(expDiv);
+            console.log('[CategoryLearning] Created experiment container div');
+        }
+
+        // Store reference to our container
+        ExperimentState.containerElement = expDiv;
+
+        console.log('[CategoryLearning] Container set up in Qualtrics');
     } else {
-        // Running outside Qualtrics (for testing)
-        document.addEventListener('DOMContentLoaded', () => {
-            initializeExperiment(phase);
-        });
+        console.log('[CategoryLearning] No Qualtrics context, using document body');
+        ExperimentState.containerElement = document.body;
     }
+
+    // Show a loading message while we initialize
+    if (ExperimentState.containerElement) {
+        ExperimentState.containerElement.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><p>Loading experiment...</p></div>';
+    }
+
+    // Now initialize the experiment (async) with proper error handling
+    initializeExperiment(phase).catch(function(error) {
+        console.error('[CategoryLearning] Initialization error:', error);
+        var errorMsg = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;color:red;">' +
+                       '<h3>Error Loading Experiment</h3>' +
+                       '<p>' + error.message + '</p>' +
+                       '<p>Please refresh the page or contact the researcher.</p></div>';
+        if (ExperimentState.containerElement) {
+            ExperimentState.containerElement.innerHTML = errorMsg;
+        } else {
+            document.body.innerHTML = errorMsg;
+        }
+    });
 }
 
 // Export for use in Qualtrics
