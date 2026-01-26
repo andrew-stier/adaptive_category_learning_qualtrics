@@ -351,6 +351,9 @@ function logTrial(data) {
 }
 
 function computeEntropy(probArray) {
+    if (!probArray || probArray.length === 0) {
+        return 0;
+    }
     let entropy = 0;
     for (const p of probArray) {
         if (p > 1e-10) {
@@ -361,6 +364,9 @@ function computeEntropy(probArray) {
 }
 
 function normalizeArray(arr) {
+    if (!arr || arr.length === 0) {
+        return [];
+    }
     const sum = arr.reduce((a, b) => a + b, 0);
     return arr.map(x => x / (sum + 1e-10));
 }
@@ -380,6 +386,12 @@ function updateAlphaBelief(itemId, response) {
     const tables = ExperimentState.lookupTables;
     const alphaValues = ExperimentState.alphaValues;
     const belief = ExperimentState.alphaBelief;
+
+    // Guard against uninitialized state
+    if (!belief || !alphaValues || !tables || !tables.response_probabilities) {
+        console.warn('[CategoryLearning] updateAlphaBelief called with uninitialized state');
+        return;
+    }
 
     // Get P(response=A | alpha) for each alpha
     const pAGivenAlpha = alphaValues.map((alpha, i) => {
@@ -401,6 +413,12 @@ function computeInformationGain(itemId) {
     const tables = ExperimentState.lookupTables;
     const alphaValues = ExperimentState.alphaValues;
     const belief = ExperimentState.alphaBelief;
+
+    // Guard against uninitialized state
+    if (!belief || !alphaValues || !tables || !tables.response_probabilities) {
+        console.warn('[CategoryLearning] computeInformationGain called with uninitialized state');
+        return 0;
+    }
 
     // Current entropy
     const hCurrent = computeEntropy(belief);
@@ -491,6 +509,16 @@ function estimateAlpha() {
     // Return the alpha with highest posterior probability
     const belief = ExperimentState.alphaBelief;
     const alphaValues = ExperimentState.alphaValues;
+
+    // Guard against uninitialized state
+    if (!belief || !alphaValues || belief.length === 0) {
+        console.warn('[CategoryLearning] estimateAlpha called with uninitialized belief');
+        return {
+            mapEstimate: null,
+            expectedValue: null,
+            posterior: [],
+        };
+    }
 
     let maxIdx = 0;
     let maxProb = belief[0];
@@ -608,13 +636,16 @@ function showStimulus(itemId) {
     const stimContainer = document.getElementById("stimulus-container");
     const imageUrl = getImageUrlForItem(itemId);
 
-    stimContainer.innerHTML = `<img src="${imageUrl}" alt="${itemId}" id="stimulus-image">`;
+    if (stimContainer) {
+        stimContainer.innerHTML = `<img src="${imageUrl}" alt="${itemId}" id="stimulus-image">`;
+    }
     ExperimentState.trialStartTime = Date.now();
     ExperimentState.currentStimulus = itemId;
 }
 
 function showFeedback(correct, timeout = false) {
     const feedbackDiv = document.getElementById("feedback");
+    if (!feedbackDiv) return;
 
     if (timeout) {
         feedbackDiv.textContent = "Too slow!";
@@ -630,15 +661,22 @@ function showFeedback(correct, timeout = false) {
 
 function clearFeedback() {
     const feedbackDiv = document.getElementById("feedback");
-    feedbackDiv.textContent = "";
-    feedbackDiv.className = "feedback";
+    if (feedbackDiv) {
+        feedbackDiv.textContent = "";
+        feedbackDiv.className = "feedback";
+    }
 }
 
 function showFixation() {
     const stimContainer = document.getElementById("stimulus-container");
-    stimContainer.style.display = 'flex';
-    stimContainer.innerHTML = '<span class="fixation">+</span>';
-    document.getElementById("feedback").textContent = '';
+    if (stimContainer) {
+        stimContainer.style.display = 'flex';
+        stimContainer.innerHTML = '<span class="fixation">+</span>';
+    }
+    const feedbackDiv = document.getElementById("feedback");
+    if (feedbackDiv) {
+        feedbackDiv.textContent = '';
+    }
 }
 
 function updateProgress() {
@@ -748,6 +786,11 @@ function handleTrainingResponse(itemId, correctCategory, response, rt) {
     const correct = response === correctCategory;
     const timeout = response === -1;
 
+    // Update alpha belief for adaptive selection (if enabled and not timeout)
+    if (CONFIG.training.adaptiveSelection && !timeout && ExperimentState.alphaBelief) {
+        updateAlphaBelief(itemId, response);
+    }
+
     // Update counters
     ExperimentState.blockTrials++;
     ExperimentState.trialNum++;
@@ -823,22 +866,30 @@ function endTrainingBlock() {
 
 function showBlockBreak() {
     console.log('[CategoryLearning] Showing block break');
-    document.getElementById('stimulus-container').style.display = 'none';
-    document.getElementById('key-reminder').style.display = 'none';
-    document.getElementById('feedback').textContent = '';
+    const stimContainer = document.getElementById('stimulus-container');
+    const keyReminder = document.getElementById('key-reminder');
+    const feedbackDiv = document.getElementById('feedback');
+    const startScreen = document.getElementById('start-screen');
+
+    if (stimContainer) stimContainer.style.display = 'none';
+    if (keyReminder) keyReminder.style.display = 'none';
+    if (feedbackDiv) feedbackDiv.textContent = '';
 
     // Re-use start screen for break
-    const startScreen = document.getElementById('start-screen');
-    startScreen.innerHTML = `
-        <span class="fixation">+</span>
-        <div class="start-prompt">Take a short break<br><br>Press <strong>SPACEBAR</strong> to continue</div>
-    `;
-    startScreen.style.display = 'block';
+    if (startScreen) {
+        startScreen.innerHTML = `
+            <span class="fixation">+</span>
+            <div class="start-prompt">Take a short break<br><br>Press <strong>SPACEBAR</strong> to continue</div>
+        `;
+        startScreen.style.display = 'block';
+    }
     ExperimentState.waitingForStart = true;
 }
 
 function endTrainingPhase(reason) {
-    const finalAccuracy = ExperimentState.totalCorrect / ExperimentState.trialNum;
+    const finalAccuracy = ExperimentState.trialNum > 0
+        ? ExperimentState.totalCorrect / ExperimentState.trialNum
+        : 0;
 
     console.log(`[CategoryLearning] Training complete: ${reason}, accuracy: ${(finalAccuracy * 100).toFixed(1)}%`);
 
@@ -1058,6 +1109,12 @@ function saveTransferData(alphaEstimate) {
 // ============================================================================
 
 function setupKeyHandler() {
+    // Prevent duplicate handlers
+    if (ExperimentState.keyHandlerSetup) {
+        return;
+    }
+    ExperimentState.keyHandlerSetup = true;
+
     document.addEventListener('keydown', function(event) {
         const key = event.key.toLowerCase();
 
@@ -1066,6 +1123,11 @@ function setupKeyHandler() {
             event.preventDefault();
             console.log('[CategoryLearning] DEBUG: Skipping remaining trials');
             ExperimentState.responseHandler = null;
+            // Clear any pending timeout
+            if (ExperimentState.timeoutId) {
+                clearTimeout(ExperimentState.timeoutId);
+                ExperimentState.timeoutId = null;
+            }
             if (ExperimentState.phase === 'training') {
                 endTrainingPhase('debug_skip');
             } else if (ExperimentState.phase === 'transfer') {
@@ -1107,18 +1169,27 @@ function setupKeyHandler() {
 
 function showStartScreen() {
     console.log('[CategoryLearning] Showing start screen');
-    document.getElementById('start-screen').style.display = 'block';
-    document.getElementById('stimulus-container').style.display = 'none';
-    document.getElementById('key-reminder').style.display = 'none';
-    document.getElementById('feedback').textContent = '';
+    const startScreen = document.getElementById('start-screen');
+    const stimContainer = document.getElementById('stimulus-container');
+    const keyReminder = document.getElementById('key-reminder');
+    const feedbackDiv = document.getElementById('feedback');
+
+    if (startScreen) startScreen.style.display = 'block';
+    if (stimContainer) stimContainer.style.display = 'none';
+    if (keyReminder) keyReminder.style.display = 'none';
+    if (feedbackDiv) feedbackDiv.textContent = '';
     ExperimentState.waitingForStart = true;
 }
 
 function startTrials() {
     console.log('[CategoryLearning] Starting trials');
-    document.getElementById('start-screen').style.display = 'none';
-    document.getElementById('stimulus-container').style.display = 'flex';
-    document.getElementById('key-reminder').style.display = 'flex';
+    const startScreen = document.getElementById('start-screen');
+    const stimContainer = document.getElementById('stimulus-container');
+    const keyReminder = document.getElementById('key-reminder');
+
+    if (startScreen) startScreen.style.display = 'none';
+    if (stimContainer) stimContainer.style.display = 'flex';
+    if (keyReminder) keyReminder.style.display = 'flex';
 
     // Show fixation cross first, then start trial
     showFixation();
@@ -1191,7 +1262,23 @@ async function initializeExperiment(phase) {
     ExperimentState.phase = phase;
     ExperimentState.trialNum = 0;
 
+    // Reset phase-specific state
     if (phase === "transfer") {
+        ExperimentState.shownTransferItems = [];
+        ExperimentState.transferData = [];
+    } else if (phase === "training") {
+        ExperimentState.trainingData = [];
+        ExperimentState.blockNum = 0;
+        ExperimentState.blockTrials = 0;
+        ExperimentState.blockCorrect = 0;
+        ExperimentState.consecutiveCriterionBlocks = 0;
+        ExperimentState.totalCorrect = 0;
+        ExperimentState.currentBlockSequence = null;
+        ExperimentState.blockItemCounts = {};
+    }
+
+    // Initialize alpha belief for adaptive selection (needed for both training and transfer)
+    if (phase === "transfer" || (phase === "training" && CONFIG.training.adaptiveSelection)) {
         initializeAlphaBelief();
     }
 
@@ -1301,6 +1388,8 @@ function initCategoryLearning(phase, questionContext) {
     // Now initialize the experiment (async) with proper error handling
     initializeExperiment(phase).catch(function(error) {
         console.error('[CategoryLearning] Initialization error:', error);
+        // Clear initializing flag to allow retry
+        ExperimentState.initializingPhase = null;
         var errorMsg = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;color:red;">' +
                        '<h3>Error Loading Experiment</h3>' +
                        '<p>' + error.message + '</p>' +
