@@ -71,7 +71,7 @@ const CONFIG = {
 
     // Transfer parameters
     transfer: {
-        totalTrials: 30,                  // Total transfer trials
+        totalTrials: 64,                  // Total transfer trials
         feedbackDuration: 0,              // No feedback in transfer
         itiDuration: 500,
         stimulusDuration: null,
@@ -438,14 +438,17 @@ function selectNextTransferItem() {
     const tables = ExperimentState.lookupTables;
     const shown = new Set(ExperimentState.shownTransferItems);
 
-    // Get all available transfer items
-    const available = tables.transfer_items
+    // Get all available transfer items (not yet shown in this cycle)
+    let available = tables.transfer_items
         .map(item => item.id)
         .filter(id => !shown.has(id));
 
+    // If all items shown, reset and allow repeats (adaptive selection will pick best)
     if (available.length === 0) {
-        // All items shown, repeat from initial ranking
-        return tables.initial_ranking[0];
+        console.log('[CategoryLearning] All transfer items shown, starting new cycle');
+        // Reset shown items but keep track for data
+        ExperimentState.shownTransferItems = [];
+        available = tables.transfer_items.map(item => item.id);
     }
 
     if (!CONFIG.transfer.adaptiveSelection) {
@@ -465,6 +468,7 @@ function selectNextTransferItem() {
         }
     }
 
+    console.log(`[CategoryLearning] Selected ${bestItem} with info gain ${bestIG.toFixed(6)}`);
     return bestItem;
 }
 
@@ -866,15 +870,45 @@ function endTransferPhase() {
         Qualtrics.SurveyEngine.setEmbeddedData('experiment_complete', 1);
     }
 
-    // Click next button - use stored context if available
+    // Show completion message
+    const container = ExperimentState.containerElement || document.getElementById('exp-container');
+    if (container) {
+        container.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h2>Transfer phase complete!</h2><p>Please wait...</p></div>';
+    }
+
+    // Click next button - try multiple methods
     setTimeout(function() {
+        console.log('[CategoryLearning] Attempting to advance to next page...');
+
+        // Method 1: Use stored question context
         if (ExperimentState.questionContext && typeof ExperimentState.questionContext.clickNextButton === 'function') {
+            console.log('[CategoryLearning] Using questionContext.clickNextButton()');
             ExperimentState.questionContext.clickNextButton();
-        } else {
-            var nextBtn = document.getElementById('NextButton');
-            if (nextBtn) nextBtn.click();
+            return;
         }
-    }, 100);
+
+        // Method 2: Try NextButton by ID
+        var nextBtn = document.getElementById('NextButton');
+        if (nextBtn) {
+            console.log('[CategoryLearning] Clicking NextButton by ID');
+            nextBtn.style.display = 'block';
+            nextBtn.click();
+            return;
+        }
+
+        // Method 3: Try finding any next/submit button
+        var buttons = document.querySelectorAll('input[type="submit"], button[id*="Next"], input[id*="Next"]');
+        if (buttons.length > 0) {
+            console.log('[CategoryLearning] Clicking found button:', buttons[0]);
+            buttons[0].click();
+            return;
+        }
+
+        console.log('[CategoryLearning] Could not find next button - showing manual instructions');
+        if (container) {
+            container.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h2>Transfer phase complete!</h2><p>Please click the Next button below to continue.</p></div>';
+        }
+    }, 500);
 }
 
 // ============================================================================
@@ -931,6 +965,19 @@ function saveTransferData(alphaEstimate) {
 function setupKeyHandler() {
     document.addEventListener('keydown', function(event) {
         const key = event.key.toLowerCase();
+
+        // DEBUG SHORTCUT: Shift+Alt+Enter to skip remaining trials
+        if (event.shiftKey && event.altKey && event.key === 'Enter') {
+            event.preventDefault();
+            console.log('[CategoryLearning] DEBUG: Skipping remaining trials');
+            ExperimentState.responseHandler = null;
+            if (ExperimentState.phase === 'training') {
+                endTrainingPhase('debug_skip');
+            } else if (ExperimentState.phase === 'transfer') {
+                endTransferPhase();
+            }
+            return;
+        }
 
         // Handle spacebar for start/continue screens
         if (key === ' ' || event.code === 'Space') {
@@ -1095,8 +1142,18 @@ async function initializeExperiment(phase) {
 function initCategoryLearning(phase, questionContext) {
     console.log(`[CategoryLearning] Initializing ${phase} phase...`);
 
+    // Prevent double initialization
+    if (ExperimentState.initializingPhase === phase) {
+        console.log(`[CategoryLearning] Already initializing ${phase}, skipping duplicate call`);
+        return;
+    }
+    ExperimentState.initializingPhase = phase;
+
     // Store question context for later use (clicking next button, etc.)
-    ExperimentState.questionContext = questionContext;
+    // Only update if we have a valid context (don't overwrite with null)
+    if (questionContext) {
+        ExperimentState.questionContext = questionContext;
+    }
 
     // If we have a Qualtrics question context, set up the container properly
     if (questionContext && typeof questionContext.getQuestionContainer === 'function') {
