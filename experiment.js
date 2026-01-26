@@ -66,6 +66,7 @@ const CONFIG = {
         itiDuration: 500,                 // Inter-trial interval ms
         stimulusDuration: null,           // null = until response
         maxResponseTime: 5000,            // ms before timeout
+        breakBetweenBlocks: true,         // Show break screen between blocks
     },
 
     // Transfer parameters
@@ -503,6 +504,9 @@ function createExperimentHTML() {
 
     return `
         <style>
+            body, html {
+                background-color: #F5F5F5 !important;
+            }
             .exp-container {
                 display: flex;
                 flex-direction: column;
@@ -510,6 +514,7 @@ function createExperimentHTML() {
                 justify-content: center;
                 min-height: 400px;
                 font-family: Arial, sans-serif;
+                background-color: #F5F5F5;
             }
             .stimulus-container {
                 width: 300px;
@@ -533,41 +538,49 @@ function createExperimentHTML() {
             .feedback.correct { color: green; }
             .feedback.incorrect { color: red; }
             .feedback.timeout { color: orange; }
-            .progress {
-                font-size: 14px;
-                color: #666;
-                margin-top: 20px;
-            }
-            .instructions {
-                font-size: 18px;
-                text-align: center;
-                margin-bottom: 20px;
-            }
             .key-reminder {
+                display: flex;
+                justify-content: space-between;
+                width: 100%;
+                max-width: 400px;
                 font-size: 16px;
                 color: #444;
                 margin-top: 10px;
+            }
+            .key-left {
+                text-align: left;
+            }
+            .key-right {
+                text-align: right;
             }
             .fixation {
                 font-size: 48px;
                 color: #333;
             }
+            .start-screen {
+                text-align: center;
+            }
+            .start-screen .fixation {
+                margin-bottom: 30px;
+            }
+            .start-prompt {
+                font-size: 18px;
+                color: #666;
+            }
             .hidden { display: none; }
         </style>
         <div class="exp-container" id="exp-container">
-            <div class="instructions" id="instructions">
-                Press <strong>${CONFIG.keys.categoryA.toUpperCase()}</strong> for ${label0}<br>
-                Press <strong>${CONFIG.keys.categoryB.toUpperCase()}</strong> for ${label1}
-            </div>
-            <div class="stimulus-container" id="stimulus-container">
+            <div class="start-screen" id="start-screen">
                 <span class="fixation">+</span>
+                <div class="start-prompt">Press <strong>SPACEBAR</strong> to begin</div>
+            </div>
+            <div class="stimulus-container" id="stimulus-container" style="display: none;">
             </div>
             <div class="feedback" id="feedback"></div>
-            <div class="key-reminder">
-                <strong>${CONFIG.keys.categoryA.toUpperCase()}</strong> = ${label0} |
-                <strong>${CONFIG.keys.categoryB.toUpperCase()}</strong> = ${label1}
+            <div class="key-reminder" id="key-reminder" style="display: none;">
+                <span class="key-left">Press <strong>${CONFIG.keys.categoryA.toUpperCase()}</strong> = ${label0}</span>
+                <span class="key-right">Press <strong>${CONFIG.keys.categoryB.toUpperCase()}</strong> = ${label1}</span>
             </div>
-            <div class="progress" id="progress"></div>
         </div>
     `;
 }
@@ -604,20 +617,13 @@ function clearFeedback() {
 
 function showFixation() {
     const stimContainer = document.getElementById("stimulus-container");
+    stimContainer.style.display = 'flex';
     stimContainer.innerHTML = '<span class="fixation">+</span>';
+    document.getElementById("feedback").textContent = '';
 }
 
 function updateProgress() {
-    const progressDiv = document.getElementById("progress");
-
-    if (ExperimentState.phase === "training") {
-        const accuracy = ExperimentState.blockTrials > 0
-            ? (ExperimentState.blockCorrect / ExperimentState.blockTrials * 100).toFixed(0)
-            : 0;
-        progressDiv.textContent = `Block ${ExperimentState.blockNum + 1} | Trial ${ExperimentState.blockTrials}/${CONFIG.training.trialsPerBlock} | Accuracy: ${accuracy}%`;
-    } else {
-        progressDiv.textContent = `Transfer Trial ${ExperimentState.trialNum + 1}/${CONFIG.transfer.totalTrials}`;
-    }
+    // Progress display removed per design - keep function for compatibility
 }
 
 // ============================================================================
@@ -705,6 +711,8 @@ function handleTrainingResponse(itemId, correctCategory, response, rt) {
 function endTrainingBlock() {
     const accuracy = ExperimentState.blockCorrect / CONFIG.training.trialsPerBlock;
 
+    console.log(`[CategoryLearning] Block ${ExperimentState.blockNum + 1} complete, accuracy: ${(accuracy * 100).toFixed(0)}%`);
+
     // Check criterion
     if (accuracy >= CONFIG.training.criterionAccuracy) {
         ExperimentState.consecutiveCriterionBlocks++;
@@ -729,7 +737,28 @@ function endTrainingBlock() {
     ExperimentState.blockCorrect = 0;
     ExperimentState.currentBlockSequence = null;
 
-    runTrainingTrial();
+    // Show break screen or continue immediately
+    if (CONFIG.training.breakBetweenBlocks) {
+        showBlockBreak();
+    } else {
+        runTrainingTrial();
+    }
+}
+
+function showBlockBreak() {
+    console.log('[CategoryLearning] Showing block break');
+    document.getElementById('stimulus-container').style.display = 'none';
+    document.getElementById('key-reminder').style.display = 'none';
+    document.getElementById('feedback').textContent = '';
+
+    // Re-use start screen for break
+    const startScreen = document.getElementById('start-screen');
+    startScreen.innerHTML = `
+        <span class="fixation">+</span>
+        <div class="start-prompt">Take a short break<br><br>Press <strong>SPACEBAR</strong> to continue</div>
+    `;
+    startScreen.style.display = 'block';
+    ExperimentState.waitingForStart = true;
 }
 
 function endTrainingPhase(reason) {
@@ -901,9 +930,21 @@ function saveTransferData(alphaEstimate) {
 
 function setupKeyHandler() {
     document.addEventListener('keydown', function(event) {
+        const key = event.key.toLowerCase();
+
+        // Handle spacebar for start/continue screens
+        if (key === ' ' || event.code === 'Space') {
+            event.preventDefault();
+            if (ExperimentState.waitingForStart) {
+                ExperimentState.waitingForStart = false;
+                startTrials();
+                return;
+            }
+        }
+
+        // Handle category responses
         if (!ExperimentState.responseHandler) return;
 
-        const key = event.key.toLowerCase();
         const rt = Date.now() - ExperimentState.trialStartTime;
 
         let response = null;
@@ -920,6 +961,28 @@ function setupKeyHandler() {
             handler(response, rt);
         }
     });
+}
+
+function showStartScreen() {
+    console.log('[CategoryLearning] Showing start screen');
+    document.getElementById('start-screen').style.display = 'block';
+    document.getElementById('stimulus-container').style.display = 'none';
+    document.getElementById('key-reminder').style.display = 'none';
+    document.getElementById('feedback').textContent = '';
+    ExperimentState.waitingForStart = true;
+}
+
+function startTrials() {
+    console.log('[CategoryLearning] Starting trials');
+    document.getElementById('start-screen').style.display = 'none';
+    document.getElementById('stimulus-container').style.display = 'flex';
+    document.getElementById('key-reminder').style.display = 'flex';
+
+    if (ExperimentState.phase === "training") {
+        runTrainingTrial();
+    } else {
+        runTransferTrial();
+    }
 }
 
 // ============================================================================
@@ -1013,14 +1076,8 @@ async function initializeExperiment(phase) {
         }
     }
 
-    // Start first trial
-    setTimeout(() => {
-        if (phase === "training") {
-            runTrainingTrial();
-        } else {
-            runTransferTrial();
-        }
-    }, 1000);
+    // Show start screen and wait for spacebar
+    showStartScreen();
 }
 
 // ============================================================================
