@@ -1407,14 +1407,19 @@ function hideCursor() {
     const expContainer = document.getElementById('exp-container');
     if (expContainer) {
         expContainer.classList.add('hide-cursor');
+        expContainer.style.cursor = 'none';
     }
+    // Also hide on document body as fallback
+    document.body.style.cursor = 'none';
 }
 
 function showCursor() {
     const expContainer = document.getElementById('exp-container');
     if (expContainer) {
         expContainer.classList.remove('hide-cursor');
+        expContainer.style.cursor = '';
     }
+    document.body.style.cursor = '';
 }
 
 function startTrials() {
