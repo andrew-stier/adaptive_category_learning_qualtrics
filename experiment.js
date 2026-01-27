@@ -104,7 +104,7 @@ const CONFIG = {
 const LOOKUP_TABLES = null;  // Will be loaded from URL if null
 
 // Option 2: Load from external URL
-const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=2";
+const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=3";
 
 // ============================================================================
 // EXPERIMENT STATE
@@ -1332,6 +1332,9 @@ function setupKeyHandler() {
     ExperimentState.keyHandlerSetup = true;
 
     document.addEventListener('keydown', function(event) {
+        // Ignore key repeats (holding down a key)
+        if (event.repeat) return;
+
         const key = event.key.toLowerCase();
 
         // DEBUG SHORTCUT: Shift+Alt+Enter to skip remaining trials
