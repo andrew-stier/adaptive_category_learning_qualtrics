@@ -34,17 +34,17 @@
 
 const CONFIG = {
     // Base URL for stimulus images
-    // Images should be named by their binary feature string: "0000.png", "0001.png", ..., "1111.png"
+    // Images should be named by their binary feature string: "00000.png", "00001.png", ..., "11111.png"
     stimulusBaseUrl: "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/stimuli/",
     stimulusExtension: ".png",
 
-    // Feature dimension names (for display/logging only)
-    featureNames: ["Body", "Antenna", "Eyes", "Pattern"],
+    // Feature dimension names (for display/logging only) - 5 dimensions
+    featureNames: ["Body", "Antenna", "Eyes", "Pattern", "Tail"],
 
-    // Feature value labels (for display/logging only)
+    // Feature value labels (for display/logging only) - 5 dimensions
     featureValues: {
-        0: ["Round", "Single", "One", "Solid"],    // When feature = 0
-        1: ["Tall", "Double", "Two", "Spotted"]    // When feature = 1
+        0: ["Round", "Single", "One", "Solid", "None"],      // When feature = 0
+        1: ["Tall", "Double", "Two", "Spotted", "Tail"]      // When feature = 1
     },
 
     // Category labels shown to participants (will be counterbalanced)
@@ -74,7 +74,7 @@ const CONFIG = {
 
     // Transfer parameters
     transfer: {
-        totalTrials: 64,                  // Total transfer trials
+        totalTrials: 128,                 // Total transfer trials (4 per item with 32 items)
         feedbackDuration: 0,              // No feedback in transfer
         itiDuration: 500,
         timeoutExtraITI: 1000,            // Extra ITI after timeout (ms)
@@ -194,7 +194,7 @@ function stringToSeed(str) {
  * Generate counterbalancing condition for a participant.
  *
  * Returns:
- *   - dimensionOrder: Which physical dimension [0-3] maps to abstract dimension [0-3]
+ *   - dimensionOrder: Which physical dimension [0-4] maps to abstract dimension [0-4]
  *   - polarityFlips: Whether to flip 0↔1 for each dimension
  *   - labelSwap: Whether to swap category labels
  *   - conditionCode: Unique identifier for this counterbalance condition
@@ -203,11 +203,12 @@ function generateCounterbalance(participantId) {
     const seed = stringToSeed(participantId || Math.random().toString());
     const rng = seededRandom(seed);
 
-    // Shuffle dimension assignment (which physical dim = which abstract dim)
-    const dimensionOrder = seededShuffle([0, 1, 2, 3], rng);
+    // Shuffle dimension assignment (which physical dim = which abstract dim) - 5 dimensions
+    const dimensionOrder = seededShuffle([0, 1, 2, 3, 4], rng);
 
-    // Randomly flip polarity for each dimension
+    // Randomly flip polarity for each dimension - 5 dimensions
     const polarityFlips = [
+        rng() > 0.5,
         rng() > 0.5,
         rng() > 0.5,
         rng() > 0.5,
@@ -232,13 +233,13 @@ function generateCounterbalance(participantId) {
 /**
  * Transform abstract features to physical features based on counterbalancing.
  *
- * Abstract features: The logical feature vector from the category structure [D1, D2, D3, D4]
- * Physical features: What the participant actually sees [Size, Color, Shape, Pattern]
+ * Abstract features: The logical feature vector from the category structure [D1, D2, D3, D4, D5]
+ * Physical features: What the participant actually sees [Body, Antenna, Eyes, Pattern, Tail]
  */
 function abstractToPhysical(abstractFeatures, counterbalance) {
-    const physical = new Array(4);
+    const physical = new Array(5);
 
-    for (let physicalDim = 0; physicalDim < 4; physicalDim++) {
+    for (let physicalDim = 0; physicalDim < 5; physicalDim++) {
         // Which abstract dimension maps to this physical dimension?
         const abstractDim = counterbalance.dimensionOrder.indexOf(physicalDim);
 
