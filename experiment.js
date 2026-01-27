@@ -75,6 +75,7 @@ const CONFIG = {
     // Transfer parameters
     transfer: {
         totalTrials: 128,                 // Total transfer trials (4 per item with 32 items)
+        trialsPerBreak: 20,               // Show break screen every N trials
         feedbackDuration: 0,              // No feedback in transfer
         itiDuration: 500,
         timeoutExtraITI: 1000,            // Extra ITI after timeout (ms)
@@ -104,7 +105,7 @@ const CONFIG = {
 const LOOKUP_TABLES = null;  // Will be loaded from URL if null
 
 // Option 2: Load from external URL
-const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=3";
+const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=4";
 
 // ============================================================================
 // EXPERIMENT STATE
@@ -1193,13 +1194,54 @@ function handleTransferResponse(itemId, response, rt) {
 
     ExperimentState.trialNum++;
 
-    // Continue to next trial (no feedback in transfer, extra ITI if timeout)
-    const itiDuration = timeout
-        ? CONFIG.transfer.itiDuration + CONFIG.transfer.timeoutExtraITI
-        : CONFIG.transfer.itiDuration;
+    // Check if it's time for a break (every N trials, but not at the end)
+    const trialsCompleted = ExperimentState.trialNum;
+    const breakFreq = CONFIG.transfer.trialsPerBreak;
+    const needsBreak = breakFreq > 0 &&
+                       trialsCompleted % breakFreq === 0 &&
+                       trialsCompleted < CONFIG.transfer.totalTrials;
 
-    showFixation();
-    setTimeout(runTransferTrial, itiDuration);
+    if (needsBreak) {
+        // Show break screen
+        showFixation();
+        setTimeout(() => {
+            showTransferBreak();
+        }, CONFIG.transfer.itiDuration);
+    } else {
+        // Continue to next trial (no feedback in transfer, extra ITI if timeout)
+        const itiDuration = timeout
+            ? CONFIG.transfer.itiDuration + CONFIG.transfer.timeoutExtraITI
+            : CONFIG.transfer.itiDuration;
+
+        showFixation();
+        setTimeout(runTransferTrial, itiDuration);
+    }
+}
+
+function showTransferBreak() {
+    console.log('[CategoryLearning] Showing transfer break after trial', ExperimentState.trialNum);
+
+    // Show cursor during break
+    showCursor();
+
+    const stimContainer = document.getElementById('stimulus-container');
+    const keyReminder = document.getElementById('key-reminder');
+    const feedbackDiv = document.getElementById('feedback');
+    const startScreen = document.getElementById('start-screen');
+
+    if (stimContainer) stimContainer.style.display = 'none';
+    if (keyReminder) keyReminder.style.display = 'none';
+    if (feedbackDiv) feedbackDiv.textContent = '';
+
+    // Show break screen
+    if (startScreen) {
+        startScreen.innerHTML = `
+            <span class="fixation">+</span>
+            <div class="start-prompt">Take a short break<br><br>Press <strong>SPACEBAR</strong> to continue</div>
+        `;
+        startScreen.style.display = 'block';
+    }
+    ExperimentState.waitingForStart = true;
 }
 
 function endTransferPhase() {
