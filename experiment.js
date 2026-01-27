@@ -123,6 +123,9 @@ const ExperimentState = {
     currentStimulus: null,
     trialStartTime: null,
 
+    // Response state - prevents multiple key presses and presses during feedback/ITI
+    acceptingResponse: false, // Only true when stimulus is shown and waiting for first response
+
     // Data storage
     trainingData: [],
     transferData: [],
@@ -824,6 +827,8 @@ function showStimulus(itemId) {
     }
     ExperimentState.trialStartTime = Date.now();
     ExperimentState.currentStimulus = itemId;
+    // Enable response collection - only first key press will count
+    ExperimentState.acceptingResponse = true;
 }
 
 function showFeedback(correct, timeout = false) {
@@ -967,6 +972,10 @@ function runTrainingTrial() {
 }
 
 function handleTrainingResponse(itemId, correctCategory, response, rt) {
+    // Stop accepting responses (prevents key presses during feedback/ITI)
+    ExperimentState.acceptingResponse = false;
+    ExperimentState.responseHandler = null;
+
     // Clear timeout
     if (ExperimentState.timeoutId) {
         clearTimeout(ExperimentState.timeoutId);
@@ -1147,6 +1156,10 @@ function runTransferTrial() {
 }
 
 function handleTransferResponse(itemId, response, rt) {
+    // Stop accepting responses (prevents key presses during feedback/ITI)
+    ExperimentState.acceptingResponse = false;
+    ExperimentState.responseHandler = null;
+
     // Clear timeout
     if (ExperimentState.timeoutId) {
         clearTimeout(ExperimentState.timeoutId);
@@ -1348,8 +1361,9 @@ function setupKeyHandler() {
             }
         }
 
-        // Handle category responses
-        if (!ExperimentState.responseHandler) return;
+        // Handle category responses - only accept if we're waiting for a response
+        // This prevents multiple key presses and key presses during feedback/ITI
+        if (!ExperimentState.acceptingResponse || !ExperimentState.responseHandler) return;
 
         const rt = Date.now() - ExperimentState.trialStartTime;
 
@@ -1362,8 +1376,10 @@ function setupKeyHandler() {
         }
 
         if (response !== null) {
+            // Immediately stop accepting responses to prevent double presses
+            ExperimentState.acceptingResponse = false;
             const handler = ExperimentState.responseHandler;
-            ExperimentState.responseHandler = null;  // Prevent double responses
+            ExperimentState.responseHandler = null;
             handler(response, rt);
         }
     });
