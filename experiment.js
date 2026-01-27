@@ -59,7 +59,7 @@ const CONFIG = {
     // Training parameters
     training: {
         trialsPerBlock: 10,
-        maxBlocks: 50,                    // Maximum 500 trials
+        maxBlocks: 40,                    // Maximum 400 trials
         criterionAccuracy: 0.9,           // 90% accuracy required
         criterionBlocks: 3,               // For 3 consecutive blocks
         feedbackDuration: 1000,           // ms
@@ -105,7 +105,7 @@ const CONFIG = {
 const LOOKUP_TABLES = null;  // Will be loaded from URL if null
 
 // Option 2: Load from external URL
-const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=4";
+const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=5";
 
 // ============================================================================
 // EXPERIMENT STATE
@@ -1074,8 +1074,8 @@ function endTrainingBlock() {
 function showBlockBreak() {
     console.log('[CategoryLearning] Showing block break');
 
-    // Show cursor during break
-    showCursor();
+    // Keep cursor hidden during break (consistent with trial experience)
+    hideCursor();
 
     const stimContainer = document.getElementById('stimulus-container');
     const keyReminder = document.getElementById('key-reminder');
@@ -1103,6 +1103,9 @@ function endTrainingPhase(reason) {
         : 0;
 
     console.log(`[CategoryLearning] Training complete: ${reason}, accuracy: ${(finalAccuracy * 100).toFixed(1)}%`);
+
+    // Show cursor again before navigating to transfer instructions
+    showCursor();
 
     // Save training data to Qualtrics
     saveTrainingData(finalAccuracy, reason);
@@ -1221,8 +1224,8 @@ function handleTransferResponse(itemId, response, rt) {
 function showTransferBreak() {
     console.log('[CategoryLearning] Showing transfer break after trial', ExperimentState.trialNum);
 
-    // Show cursor during break
-    showCursor();
+    // Keep cursor hidden during break (consistent with trial experience)
+    hideCursor();
 
     const stimContainer = document.getElementById('stimulus-container');
     const keyReminder = document.getElementById('key-reminder');
