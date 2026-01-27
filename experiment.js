@@ -915,11 +915,16 @@ function endTrainingPhase(reason) {
         Qualtrics.SurveyEngine.setEmbeddedData('training_accuracy', finalAccuracy);
     }
 
-    // Click next button - use stored context if available
+    // Click next button - use bound proceed function (like MinnoJS working code)
     setTimeout(function() {
-        if (ExperimentState.questionContext && typeof ExperimentState.questionContext.clickNextButton === 'function') {
+        if (typeof ExperimentState.proceedToNextPage === 'function') {
+            console.log('[CategoryLearning] Training complete, using bound proceedToNextPage()');
+            ExperimentState.proceedToNextPage();
+        } else if (ExperimentState.questionContext && typeof ExperimentState.questionContext.clickNextButton === 'function') {
+            console.log('[CategoryLearning] Training complete, using questionContext.clickNextButton()');
             ExperimentState.questionContext.clickNextButton();
         } else {
+            console.log('[CategoryLearning] Training complete, clicking NextButton by ID');
             var nextBtn = document.getElementById('NextButton');
             if (nextBtn) nextBtn.click();
         }
@@ -1013,62 +1018,44 @@ function endTransferPhase() {
         container.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h2>Transfer phase complete!</h2><p>Please wait...</p></div>';
     }
 
-    // Click next button - try multiple methods with verification
+    // Click next button - use bound proceed function (like MinnoJS working code)
     setTimeout(function() {
         console.log('[CategoryLearning] Attempting to advance to next page...');
 
-        // Helper to check if page navigation started
-        var navigationAttempted = false;
+        // Method 1: Use bound proceed function (most reliable)
+        if (typeof ExperimentState.proceedToNextPage === 'function') {
+            console.log('[CategoryLearning] Using bound proceedToNextPage()');
+            ExperimentState.proceedToNextPage();
+            return;
+        }
 
-        // Method 1: Try NextButton by ID first (more reliable than questionContext)
+        // Method 2: Try questionContext.clickNextButton
+        if (ExperimentState.questionContext && typeof ExperimentState.questionContext.clickNextButton === 'function') {
+            console.log('[CategoryLearning] Using questionContext.clickNextButton()');
+            ExperimentState.questionContext.clickNextButton();
+            return;
+        }
+
+        // Method 3: Try NextButton by ID
         var nextBtn = document.getElementById('NextButton');
         if (nextBtn) {
-            console.log('[CategoryLearning] Found NextButton, making visible and clicking');
-            nextBtn.style.display = 'block';
-            nextBtn.style.visibility = 'visible';
-            nextBtn.disabled = false;
+            console.log('[CategoryLearning] Clicking NextButton by ID');
             nextBtn.click();
-            navigationAttempted = true;
+            return;
         }
 
-        // Method 2: If NextButton not found, try questionContext
-        if (!navigationAttempted && ExperimentState.questionContext && typeof ExperimentState.questionContext.clickNextButton === 'function') {
-            console.log('[CategoryLearning] Using questionContext.clickNextButton()');
-            try {
-                ExperimentState.questionContext.clickNextButton();
-                navigationAttempted = true;
-            } catch (e) {
-                console.log('[CategoryLearning] questionContext.clickNextButton() failed:', e);
-            }
-        }
-
-        // Method 3: Try finding any next/submit button
-        if (!navigationAttempted) {
-            var buttons = document.querySelectorAll('input[type="submit"], button[id*="Next"], input[id*="Next"]');
-            if (buttons.length > 0) {
-                console.log('[CategoryLearning] Clicking found button:', buttons[0]);
-                buttons[0].click();
-                navigationAttempted = true;
-            }
-        }
-
-        // If nothing worked, show manual instructions and make button visible
-        if (!navigationAttempted) {
-            console.log('[CategoryLearning] Could not find next button - showing manual instructions');
-        }
-
-        // Always show a message and try to expose the next button
+        // Fallback: show manual instructions
+        console.log('[CategoryLearning] Could not find next button - showing manual instructions');
         if (container) {
             container.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h2>Transfer phase complete!</h2><p>Click the Next button below to continue.</p></div>';
         }
-
-        // Force-show any hidden next buttons as fallback
+        // Force-show any hidden next buttons
         var allNextButtons = document.querySelectorAll('[id*="Next"], [class*="Next"], input[type="submit"]');
         allNextButtons.forEach(function(btn) {
             btn.style.display = 'inline-block';
             btn.style.visibility = 'visible';
         });
-    }, 500);
+    }, 100);
 }
 
 // ============================================================================
@@ -1347,10 +1334,14 @@ function initCategoryLearning(phase, questionContext) {
     }
     ExperimentState.initializingPhase = phase;
 
-    // Store question context for later use (clicking next button, etc.)
+    // Store question context and bound proceed function for later use
     // Only update if we have a valid context (don't overwrite with null)
     if (questionContext) {
         ExperimentState.questionContext = questionContext;
+        // Store bound function like working MinnoJS code does
+        if (typeof questionContext.clickNextButton === 'function') {
+            ExperimentState.proceedToNextPage = questionContext.clickNextButton.bind(questionContext);
+        }
     }
 
     // If we have a Qualtrics question context, set up the container properly
