@@ -64,6 +64,7 @@ const CONFIG = {
         criterionBlocks: 3,               // For 3 consecutive blocks
         feedbackDuration: 1000,           // ms
         itiDuration: 500,                 // Inter-trial interval ms
+        timeoutExtraITI: 1000,            // Extra ITI after timeout (ms)
         stimulusDuration: null,           // null = until response
         maxResponseTime: 5000,            // ms before timeout
         breakBetweenBlocks: true,         // Show break screen between blocks
@@ -76,9 +77,13 @@ const CONFIG = {
         totalTrials: 64,                  // Total transfer trials
         feedbackDuration: 0,              // No feedback in transfer
         itiDuration: 500,
+        timeoutExtraITI: 1000,            // Extra ITI after timeout (ms)
         stimulusDuration: null,
         maxResponseTime: 5000,
-        adaptiveSelection: true,          // Use adaptive stimulus selection
+        adaptiveSelection: false,         // false = use pre-computed schedule, true = online selection
+        minSpacing: 3,                    // Minimum items between repeats of same stimulus
+        minPresentations: 2,              // Minimum presentations per item
+        maxPresentations: 8,              // Maximum presentations per item
     },
 
     // Attention check parameters
@@ -454,42 +459,208 @@ function computeInformationGain(itemId) {
     return hCurrent - hExpected;
 }
 
-function selectNextTransferItem() {
+/**
+ * Calculate presentation counts based on alpha estimate from training.
+ * Uses hybrid approach: minimum counts for all + extra for high-info-gain items.
+ */
+function calculatePresentationCounts() {
     const tables = ExperimentState.lookupTables;
-    const shown = new Set(ExperimentState.shownTransferItems);
-
-    // Get all transfer items
+    const totalTrials = CONFIG.transfer.totalTrials;
+    const minPres = CONFIG.transfer.minPresentations;
+    const maxPres = CONFIG.transfer.maxPresentations;
     const allItems = tables.transfer_items.map(item => item.id);
+    const numItems = allItems.length;
 
-    if (!CONFIG.transfer.adaptiveSelection) {
-        // Random selection without replacement until all shown, then reset
-        let available = allItems.filter(id => !shown.has(id));
-        if (available.length === 0) {
-            console.log('[CategoryLearning] All transfer items shown, resetting');
-            ExperimentState.shownTransferItems = [];
-            available = allItems;
-        }
-        return available[Math.floor(Math.random() * available.length)];
+    // Log current alpha estimate from training
+    const alphaEst = estimateAlpha();
+    console.log('[CategoryLearning] Alpha estimate from training:', {
+        mapEstimate: alphaEst.mapEstimate,
+        expectedValue: alphaEst.expectedValue?.toFixed(2)
+    });
+
+    // Calculate information gain for each item using current alpha belief
+    const infoGains = {};
+    for (const itemId of allItems) {
+        infoGains[itemId] = computeInformationGain(itemId);
     }
 
-    // Adaptive selection: choose item with highest information gain
-    // Allow any item to be selected, but track presentation counts
+    console.log('[CategoryLearning] Information gains per item:', infoGains);
+
+    // Start with minimum presentations for all items
+    const itemCounts = {};
+    for (const itemId of allItems) {
+        itemCounts[itemId] = minPres;
+    }
+
+    // Calculate remaining trials to distribute
+    let usedTrials = numItems * minPres;
+    let remainingTrials = totalTrials - usedTrials;
+
+    // Distribute extra trials proportionally to information gain
+    const totalIG = Object.values(infoGains).reduce((a, b) => a + b, 0);
+
+    if (totalIG > 0 && remainingTrials > 0) {
+        // Sort items by info gain (highest first)
+        const sortedItems = allItems.slice().sort((a, b) => infoGains[b] - infoGains[a]);
+
+        // Distribute extra trials proportionally
+        for (const itemId of sortedItems) {
+            if (remainingTrials <= 0) break;
+
+            const proportion = infoGains[itemId] / totalIG;
+            const extraTrials = Math.round(proportion * (totalTrials - numItems * minPres));
+            const canAdd = Math.min(extraTrials, maxPres - itemCounts[itemId], remainingTrials);
+
+            if (canAdd > 0) {
+                itemCounts[itemId] += canAdd;
+                remainingTrials -= canAdd;
+            }
+        }
+
+        // If still have remaining trials (due to rounding), distribute to highest IG items
+        let idx = 0;
+        while (remainingTrials > 0 && idx < sortedItems.length) {
+            const itemId = sortedItems[idx % sortedItems.length];
+            if (itemCounts[itemId] < maxPres) {
+                itemCounts[itemId]++;
+                remainingTrials--;
+            }
+            idx++;
+            // Prevent infinite loop if all items at max
+            if (idx > sortedItems.length * maxPres) break;
+        }
+    }
+
+    return itemCounts;
+}
+
+/**
+ * Generate a pre-computed transfer schedule with spacing constraints.
+ * Uses alpha-based presentation counts and ensures minimum spacing between repeats.
+ */
+function generateTransferSchedule() {
+    const minSpacing = CONFIG.transfer.minSpacing;
+
+    // Calculate presentation counts based on alpha estimate
+    const itemCounts = calculatePresentationCounts();
+
+    console.log('[CategoryLearning] Alpha-based presentation counts:', itemCounts);
+
+    // Create pool of all item presentations
+    const pool = [];
+    for (const [itemId, count] of Object.entries(itemCounts)) {
+        for (let i = 0; i < count; i++) {
+            pool.push(itemId);
+        }
+    }
+
+    console.log('[CategoryLearning] Total presentations in pool:', pool.length);
+
+    // Shuffle the pool
+    const shuffled = shuffleArray(pool);
+
+    // Build schedule with spacing constraints
+    const schedule = [];
+    const remaining = [...shuffled];
+    const recentItems = []; // Track last N items for spacing
+
+    let attempts = 0;
+    const maxAttempts = remaining.length * 100; // Prevent infinite loop
+
+    while (remaining.length > 0 && attempts < maxAttempts) {
+        attempts++;
+
+        // Find items that satisfy spacing constraint
+        const validIndices = [];
+        for (let i = 0; i < remaining.length; i++) {
+            const item = remaining[i];
+            // Check if this item was shown in the last minSpacing trials
+            if (!recentItems.slice(-minSpacing).includes(item)) {
+                validIndices.push(i);
+            }
+        }
+
+        // If no valid items (spacing constraint too tight), relax it
+        let chosenIndex;
+        if (validIndices.length > 0) {
+            // Pick randomly from valid items
+            chosenIndex = validIndices[Math.floor(Math.random() * validIndices.length)];
+        } else {
+            // Fallback: pick the item that was shown longest ago
+            let bestIndex = 0;
+            let bestDistance = -1;
+            for (let i = 0; i < remaining.length; i++) {
+                const item = remaining[i];
+                const lastSeen = recentItems.lastIndexOf(item);
+                const distance = lastSeen === -1 ? Infinity : recentItems.length - lastSeen;
+                if (distance > bestDistance) {
+                    bestDistance = distance;
+                    bestIndex = i;
+                }
+            }
+            chosenIndex = bestIndex;
+        }
+
+        const chosenItem = remaining[chosenIndex];
+        schedule.push(chosenItem);
+        remaining.splice(chosenIndex, 1);
+        recentItems.push(chosenItem);
+    }
+
+    console.log('[CategoryLearning] Generated transfer schedule with', schedule.length, 'trials');
+
+    // Log summary of actual counts
+    const actualCounts = {};
+    for (const item of schedule) {
+        actualCounts[item] = (actualCounts[item] || 0) + 1;
+    }
+    console.log('[CategoryLearning] Final presentation counts:', actualCounts);
+
+    return schedule;
+}
+
+function selectNextTransferItem() {
+    const tables = ExperimentState.lookupTables;
+
+    // Use pre-computed schedule if not using online adaptive selection
+    if (!CONFIG.transfer.adaptiveSelection) {
+        // Generate schedule if not already done
+        if (!ExperimentState.transferSchedule || ExperimentState.transferSchedule.length === 0) {
+            ExperimentState.transferSchedule = generateTransferSchedule();
+            ExperimentState.transferScheduleIndex = 0;
+        }
+
+        // Get next item from schedule
+        const index = ExperimentState.transferScheduleIndex;
+        if (index < ExperimentState.transferSchedule.length) {
+            const itemId = ExperimentState.transferSchedule[index];
+            ExperimentState.transferScheduleIndex++;
+            console.log(`[CategoryLearning] Schedule item ${index + 1}/${ExperimentState.transferSchedule.length}: ${itemId}`);
+            return itemId;
+        } else {
+            // Fallback: random selection if schedule exhausted
+            const allItems = tables.transfer_items.map(item => item.id);
+            return allItems[Math.floor(Math.random() * allItems.length)];
+        }
+    }
+
+    // Online adaptive selection: choose item with highest information gain
+    const allItems = tables.transfer_items.map(item => item.id);
     const presentationCounts = {};
     for (const id of allItems) {
         presentationCounts[id] = ExperimentState.transferData.filter(t => t.itemId === id).length;
     }
 
-    // Find max presentations to ensure some balance (no item shown more than 2x the minimum)
+    // Find max presentations to ensure some balance
     const minCount = Math.min(...Object.values(presentationCounts));
-    const maxAllowed = minCount + 3; // Allow up to 3 more presentations than the least-shown item
+    const maxAllowed = minCount + 3;
 
-    // Filter items that haven't exceeded max presentations
     let available = allItems.filter(id => presentationCounts[id] < maxAllowed);
     if (available.length === 0) {
-        available = allItems; // Fallback if all maxed out
+        available = allItems;
     }
 
-    // Prevent back-to-back repetition: exclude the last shown item
+    // Prevent back-to-back repetition
     const lastItem = ExperimentState.lastTransferItem;
     if (lastItem && available.length > 1) {
         available = available.filter(id => id !== lastItem);
@@ -508,7 +679,7 @@ function selectNextTransferItem() {
 
     ExperimentState.lastTransferItem = bestItem;
     const count = presentationCounts[bestItem] + 1;
-    console.log(`[CategoryLearning] Selected ${bestItem} (presentation #${count}) with info gain ${bestIG.toFixed(6)}`);
+    console.log(`[CategoryLearning] Adaptive: selected ${bestItem} (presentation #${count}) with info gain ${bestIG.toFixed(6)}`);
     return bestItem;
 }
 
@@ -560,6 +731,11 @@ function createExperimentHTML() {
         <style>
             body, html {
                 background-color: #F5F5F5 !important;
+            }
+            /* Hide cursor during trials */
+            .exp-container.hide-cursor,
+            .exp-container.hide-cursor * {
+                cursor: none !important;
             }
             .exp-container {
                 display: flex;
@@ -800,8 +976,10 @@ function handleTrainingResponse(itemId, correctCategory, response, rt) {
     const correct = response === correctCategory;
     const timeout = response === -1;
 
-    // Update alpha belief for adaptive selection (if enabled and not timeout)
-    if (CONFIG.training.adaptiveSelection && !timeout && ExperimentState.alphaBelief) {
+    // Update alpha belief during training (for transfer schedule calculation)
+    // Skip first 2 blocks since responses are likely random guessing
+    const minBlocksForAlpha = 2;
+    if (!timeout && ExperimentState.alphaBelief && ExperimentState.blockNum >= minBlocksForAlpha) {
         updateAlphaBelief(itemId, response);
     }
 
@@ -827,11 +1005,15 @@ function handleTrainingResponse(itemId, correctCategory, response, rt) {
     // Show feedback
     showFeedback(correct, timeout);
 
-    // Continue to next trial after feedback
+    // Continue to next trial after feedback (extra ITI if timeout)
+    const itiDuration = timeout
+        ? CONFIG.training.itiDuration + CONFIG.training.timeoutExtraITI
+        : CONFIG.training.itiDuration;
+
     setTimeout(() => {
         clearFeedback();
         showFixation();
-        setTimeout(runTrainingTrial, CONFIG.training.itiDuration);
+        setTimeout(runTrainingTrial, itiDuration);
     }, CONFIG.training.feedbackDuration);
 }
 
@@ -880,6 +1062,10 @@ function endTrainingBlock() {
 
 function showBlockBreak() {
     console.log('[CategoryLearning] Showing block break');
+
+    // Show cursor during break
+    showCursor();
+
     const stimContainer = document.getElementById('stimulus-container');
     const keyReminder = document.getElementById('key-reminder');
     const feedbackDiv = document.getElementById('feedback');
@@ -993,15 +1179,30 @@ function handleTransferResponse(itemId, response, rt) {
 
     ExperimentState.trialNum++;
 
-    // Continue to next trial (no feedback in transfer)
+    // Continue to next trial (no feedback in transfer, extra ITI if timeout)
+    const itiDuration = timeout
+        ? CONFIG.transfer.itiDuration + CONFIG.transfer.timeoutExtraITI
+        : CONFIG.transfer.itiDuration;
+
     showFixation();
-    setTimeout(runTransferTrial, CONFIG.transfer.itiDuration);
+    setTimeout(runTransferTrial, itiDuration);
 }
 
 function endTransferPhase() {
     const alphaEstimate = estimateAlpha();
 
     console.log(`[CategoryLearning] Transfer complete. Alpha estimate: ${alphaEstimate.expectedValue.toFixed(2)}`);
+
+    // Show cursor again
+    showCursor();
+
+    // Reset background colors to white
+    document.body.style.backgroundColor = '';
+    if (typeof jQuery !== 'undefined') {
+        jQuery('.SkinInner').css('background-color', '');
+        jQuery('.Skin').css('background-color', '');
+        jQuery('body').css('background-color', '');
+    }
 
     // Save transfer data to Qualtrics
     saveTransferData(alphaEstimate);
@@ -1182,6 +1383,20 @@ function showStartScreen() {
     ExperimentState.waitingForStart = true;
 }
 
+function hideCursor() {
+    const expContainer = document.getElementById('exp-container');
+    if (expContainer) {
+        expContainer.classList.add('hide-cursor');
+    }
+}
+
+function showCursor() {
+    const expContainer = document.getElementById('exp-container');
+    if (expContainer) {
+        expContainer.classList.remove('hide-cursor');
+    }
+}
+
 function startTrials() {
     console.log('[CategoryLearning] Starting trials');
     const startScreen = document.getElementById('start-screen');
@@ -1191,6 +1406,9 @@ function startTrials() {
     if (startScreen) startScreen.style.display = 'none';
     if (stimContainer) stimContainer.style.display = 'flex';
     if (keyReminder) keyReminder.style.display = 'flex';
+
+    // Hide cursor during trials
+    hideCursor();
 
     // Show fixation cross first, then start trial
     showFixation();
@@ -1268,6 +1486,9 @@ async function initializeExperiment(phase) {
         ExperimentState.shownTransferItems = [];
         ExperimentState.transferData = [];
         ExperimentState.lastTransferItem = null;
+        ExperimentState.transferSchedule = null;  // Will be generated using alpha from training
+        ExperimentState.transferScheduleIndex = 0;
+        // Note: alphaBelief is NOT reset - we keep the estimate from training
     } else if (phase === "training") {
         ExperimentState.trainingData = [];
         ExperimentState.blockNum = 0;
@@ -1280,9 +1501,16 @@ async function initializeExperiment(phase) {
         ExperimentState.lastTrainingItem = null;
     }
 
-    // Initialize alpha belief for adaptive selection (needed for both training and transfer)
-    if (phase === "transfer" || (phase === "training" && CONFIG.training.adaptiveSelection)) {
+    // Initialize alpha belief - needed for:
+    // - Adaptive training selection (if enabled)
+    // - Alpha-dependent transfer schedule calculation
+    // - Transfer phase belief tracking
+    // Only initialize if not already set (preserve training estimates for transfer)
+    if (!ExperimentState.alphaBelief) {
         initializeAlphaBelief();
+        console.log('[CategoryLearning] Initialized alpha belief (uniform prior)');
+    } else if (phase === "transfer") {
+        console.log('[CategoryLearning] Using alpha belief from training for transfer schedule');
     }
 
     // Create experiment HTML in the appropriate container
