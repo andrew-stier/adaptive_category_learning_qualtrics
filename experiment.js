@@ -104,7 +104,7 @@ const CONFIG = {
 const LOOKUP_TABLES = null;  // Will be loaded from URL if null
 
 // Option 2: Load from external URL
-const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json";
+const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=2";
 
 // ============================================================================
 // EXPERIMENT STATE
