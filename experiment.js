@@ -1,32 +1,3 @@
-/**
- * Adaptive Category Learning Experiment for Qualtrics
- *
- * This code implements a category learning experiment with:
- * - Fixed training phase (to criterion or max trials)
- * - Adaptive transfer phase (using precomputed lookup tables)
- * - Full data logging for HDP model fitting
- *
- * Setup Instructions:
- * 1. Create a Qualtrics survey with the following structure:
- *    - Q1: Instructions (Text/Graphic)
- *    - Q2: Training Phase (Text/Graphic with JS)
- *    - Q3: Transfer Instructions (Text/Graphic)
- *    - Q4: Transfer Phase (Text/Graphic with JS)
- *    - Q5: Demographics
- *
- * 2. In the Survey Flow, add Embedded Data fields:
- *    - training_data (text, 20000 chars)
- *    - transfer_data (text, 20000 chars)
- *    - alpha_estimate (number)
- *    - training_accuracy (number)
- *    - experiment_complete (number)
- *
- * 3. Add this JavaScript to Q2 and Q4 (training and transfer)
- *
- * 4. Upload your stimulus images to Qualtrics or host externally
- *
- * 5. Upload lookup_tables.json to a public URL or embed in the code
- */
 
 // ============================================================================
 // CONFIGURATION - MODIFY THIS SECTION FOR YOUR EXPERIMENT
@@ -74,17 +45,19 @@ const CONFIG = {
 
     // Transfer parameters
     transfer: {
-        totalTrials: 128,                 // Total transfer trials (4 per item with 32 items)
+        totalTrials: 128,                 // Total transfer trials (4 per item with 32 items on average)
         trialsPerBreak: 20,               // Show break screen every N trials
         feedbackDuration: 0,              // No feedback in transfer
         itiDuration: 500,
         timeoutExtraITI: 1000,            // Extra ITI after timeout (ms)
         stimulusDuration: null,
         maxResponseTime: 5000,
-        adaptiveSelection: false,         // false = use pre-computed schedule, true = online selection
-        minSpacing: 3,                    // Minimum items between repeats of same stimulus
-        minPresentations: 2,              // Minimum presentations per item
-        maxPresentations: 8,              // Maximum presentations per item
+        adaptiveSelection: true,          // Online ADO: pick max-IG item at each trial based on current α posterior
+        minSpacing: 3,                    // Minimum items between repeats of same stimulus (for offline schedule fallback)
+        minPresentations: 2,              // Minimum presentations per item (offline schedule only)
+        maxPresentations: 8,              // Maximum presentations per item (offline schedule only)
+        adaptiveMaxPerItem: 12,           // Cap on per-item presentations under online ADO; prevents degenerate cycling
+        adaptiveSkipLastItem: true,       // Avoid presenting the same item twice in a row
     },
 
     // Attention check parameters
@@ -105,7 +78,7 @@ const CONFIG = {
 const LOOKUP_TABLES = null;  // Will be loaded from URL if null
 
 // Option 2: Load from external URL
-const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=5";
+const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=6";
 
 // ============================================================================
 // EXPERIMENT STATE
@@ -649,26 +622,30 @@ function selectNextTransferItem() {
         }
     }
 
-    // Online adaptive selection: choose item with highest information gain
+    // Online ADO: pick item with highest expected information gain about α
+    // under the current posterior belief.
+    // - Cap each item at adaptiveMaxPerItem presentations to prevent degenerate
+    //   cycling on a single highest-IG item.
+    // - Soft anti-repetition: skip the immediately preceding item unless it is
+    //   strictly the most informative remaining option.
     const allItems = tables.transfer_items.map(item => item.id);
     const presentationCounts = {};
     for (const id of allItems) {
         presentationCounts[id] = ExperimentState.transferData.filter(t => t.itemId === id).length;
     }
 
-    // Find max presentations to ensure some balance
-    const minCount = Math.min(...Object.values(presentationCounts));
-    const maxAllowed = minCount + 3;
-
-    let available = allItems.filter(id => presentationCounts[id] < maxAllowed);
+    const maxPerItem = CONFIG.transfer.adaptiveMaxPerItem || 12;
+    let available = allItems.filter(id => presentationCounts[id] < maxPerItem);
     if (available.length === 0) {
+        // All items hit the cap — relax it (shouldn't happen with default 32 items × 12 cap = 384 ≫ 128)
         available = allItems;
     }
 
-    // Prevent back-to-back repetition
+    // Soft anti-back-to-back: skip the immediately preceding item if there's an alternative
     const lastItem = ExperimentState.lastTransferItem;
-    if (lastItem && available.length > 1) {
-        available = available.filter(id => id !== lastItem);
+    if (CONFIG.transfer.adaptiveSkipLastItem && lastItem && available.length > 1) {
+        const filtered = available.filter(id => id !== lastItem);
+        if (filtered.length > 0) available = filtered;
     }
 
     let bestItem = available[0];
