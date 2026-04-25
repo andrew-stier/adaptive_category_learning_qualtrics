@@ -77,6 +77,9 @@ const CONFIG = {
         maxPresentations: 8,              // Maximum presentations per item (offline schedule only)
         adaptiveMaxPerItem: 8,            // Cap on per-item presentations under online ADO. Lower → more diverse coverage.
         adaptiveAntiRecentK: 6,           // Don't repeat any item within the last K trials. Higher → less repetitive.
+        adaptiveMinCoverageTarget: 20,    // Growing min-coverage rule: at trial t, no item may exceed floor(t/N)+1 presentations.
+                                          //   N=20 ⇒ all 20 highest-IG items shown ≥ 1× by trial 20, ≥ 2× by trial 40, etc.
+                                          //   Stops the early "AB-CD-AB" concentration on a few high-IG items.
     },
 
     // Attention check parameters
@@ -642,22 +645,34 @@ function selectNextTransferItem() {
     }
 
     // Online ADO: pick item with highest expected information gain about α
-    // under the current posterior belief.
-    // - Cap each item at adaptiveMaxPerItem presentations.
-    // - Anti-recent-K window: exclude any item shown in the last K trials.
-    //   This eliminates the pair-alternation pattern that occurs when only
-    //   anti-back-to-back is enforced and the top-2 items dominate IG.
+    // under the current posterior belief, subject to:
+    //  (a) static cap (adaptiveMaxPerItem) on total presentations per item
+    //  (b) growing min-coverage cap: at trial t, item count must be < floor(t / N) + 1
+    //      where N = adaptiveMinCoverageTarget. This forces breadth early
+    //      (every top-N item shown once before any second presentation, then twice
+    //      before any third, etc.) and eliminates early-block "ABAB" concentration
+    //      on the 2-3 highest-IG items.
+    //  (c) anti-recent-K: exclude items shown in the last K trials.
     const allItems = tables.transfer_items.map(item => item.id);
     const presentationCounts = {};
     for (const id of allItems) {
         presentationCounts[id] = ExperimentState.transferData.filter(t => t.itemId === id).length;
     }
 
-    const maxPerItem = CONFIG.transfer.adaptiveMaxPerItem || 8;
-    let available = allItems.filter(id => presentationCounts[id] < maxPerItem);
+    const t = ExperimentState.transferData.length;        // # trials already done
+    const staticCap = CONFIG.transfer.adaptiveMaxPerItem || 8;
+    const N_target = CONFIG.transfer.adaptiveMinCoverageTarget || 20;
+    const dynamicCap = Math.floor(t / N_target) + 1;
+    const effectiveCap = Math.min(staticCap, dynamicCap);
+
+    let available = allItems.filter(id => presentationCounts[id] < effectiveCap);
     if (available.length === 0) {
-        // All items hit the cap — relax it (shouldn't happen at the default cap=8 × 32 items = 256 ≫ 128)
-        available = allItems;
+        // Dynamic cap can't be satisfied (e.g., all items at min-coverage cap).
+        // Relax to static cap only.
+        available = allItems.filter(id => presentationCounts[id] < staticCap);
+        if (available.length === 0) {
+            available = allItems;
+        }
     }
 
     // Anti-recent-K: exclude items shown in the last K transfer trials when an alternative exists
