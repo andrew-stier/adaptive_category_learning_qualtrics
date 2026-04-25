@@ -1,11 +1,11 @@
 /*
  * practice.js — confidence-key practice drill.
  *
- * Six trials, one per key (S/D/F/J/K/L). Each trial shows a target phrase
- * (e.g. "Probably Boula") and waits for the matching key press. Green
- * "Correct!" or red "Wrong" feedback after each press. Logs trial-level data
- * to Qualtrics embedded data (practice_data) and clicks the next button when
- * done.
+ * Three rounds × 6 trials, one per key per round (S/D/F/J/K/L). Each trial
+ * shows a target phrase (e.g. "Probably Boula") and waits for the matching
+ * key press. Green "Correct!" or red "Wrong" feedback after each press. Logs
+ * trial-level data to Qualtrics embedded data (practice_data) and clicks the
+ * next button when done.
  *
  * Hosted alongside experiment.js. Loaded from the practice Qualtrics question
  * via practice_loader.js.
@@ -13,9 +13,10 @@
 
 (function () {
   // ---------------------------------------------------------------------------
-  // Trial set: one per key. Order is shuffled per participant.
+  // Base trial set: one per key. Replicated per round; each round shuffled
+  // independently.
   // ---------------------------------------------------------------------------
-  const PRACTICE_TRIALS = [
+  const PRACTICE_TRIALS_BASE = [
     { prompt: "Definitely Vekki", correctKey: "s" },
     { prompt: "Probably Vekki",   correctKey: "d" },
     { prompt: "Maybe Vekki",      correctKey: "f" },
@@ -27,6 +28,7 @@
   const VALID_KEYS = new Set(["s", "d", "f", "j", "k", "l"]);
 
   const CONFIG = {
+    nRounds: 3,                  // 3 rounds × 6 trials = 18 total practice trials
     feedbackDurationMs: 800,
     itiDurationMs: 400,
     maxResponseTimeMs: 7000,
@@ -111,10 +113,22 @@
     State.waitingForStart = true;
   }
 
+  function buildTrialOrder() {
+    // Each round is the 6 base trials shuffled independently.
+    const order = [];
+    for (let r = 0; r < CONFIG.nRounds; r++) {
+      const round = shuffle(PRACTICE_TRIALS_BASE);
+      for (let i = 0; i < round.length; i++) {
+        order.push(Object.assign({}, round[i], { round: r + 1, trialInRound: i + 1 }));
+      }
+    }
+    return order;
+  }
+
   function startTrials() {
     document.getElementById("practice-start").style.display = "none";
     document.getElementById("practice-trial").style.display = "block";
-    State.trialOrder = shuffle(PRACTICE_TRIALS);
+    State.trialOrder = buildTrialOrder();
     State.trialIndex = 0;
     State.trialLog = [];
     runNextTrial();
@@ -130,7 +144,7 @@
     document.getElementById("practice-feedback").textContent = "";
     document.getElementById("practice-feedback").className = "practice-feedback";
     document.getElementById("practice-progress").textContent =
-      `Trial ${State.trialIndex + 1} of ${State.trialOrder.length}`;
+      `Round ${trial.round} of ${CONFIG.nRounds} · trial ${State.trialIndex + 1} of ${State.trialOrder.length}`;
     State.trialStartTime = Date.now();
     State.waitingForResponse = true;
 
@@ -167,6 +181,8 @@
 
     State.trialLog.push({
       trialNum: State.trialIndex + 1,
+      round: trial.round,
+      trialInRound: trial.trialInRound,
       prompt: trial.prompt,
       correctKey: trial.correctKey,
       pressedKey: key,
