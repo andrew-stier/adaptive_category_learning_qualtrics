@@ -21,10 +21,27 @@ const CONFIG = {
     // Category labels shown to participants (will be counterbalanced)
     categoryLabels: ["Vekki", "Boula"],  // Neutral nonsense names recommended
 
-    // Key bindings
+    // Key bindings for TRAINING phase (binary category, no confidence)
     keys: {
         categoryA: "e",  // Press E for Category A
         categoryB: "i"   // Press I for Category B
+    },
+
+    // Key bindings + confidence rating for TRANSFER phase
+    // S/D/F = category A (high → low confidence); J/K/L = category B (low → high)
+    confidence: {
+        enabled: true,                         // false → fall back to binary E/I in transfer
+        keyToResponse: {
+            // key → {category: 0=A or 1=B, confidence: 1=low, 2=med, 3=high}
+            "s": { category: 0, confidence: 3 },  // Definitely A
+            "d": { category: 0, confidence: 2 },  // Probably A
+            "f": { category: 0, confidence: 1 },  // Maybe A
+            "j": { category: 1, confidence: 1 },  // Maybe B
+            "k": { category: 1, confidence: 2 },  // Probably B
+            "l": { category: 1, confidence: 3 }   // Definitely B
+        },
+        // Confidence-level labels for display (low → high)
+        confLabels: ["Maybe", "Probably", "Definitely"]
     },
 
     // Training parameters
@@ -78,7 +95,7 @@ const CONFIG = {
 const LOOKUP_TABLES = null;  // Will be loaded from URL if null
 
 // Option 2: Load from external URL
-const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=7";
+const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=8";
 
 // ============================================================================
 // EXPERIMENT STATE
@@ -772,6 +789,31 @@ function createExperimentHTML() {
             .key-right {
                 text-align: right;
             }
+            .key-reminder-conf {
+                display: flex;
+                justify-content: center;
+                gap: 4px;
+                width: 100%;
+                max-width: 640px;
+                font-size: 13px;
+                color: #444;
+                margin-top: 14px;
+                flex-wrap: wrap;
+            }
+            .key-conf-cell {
+                padding: 6px 10px;
+                background-color: #ffffff;
+                border: 1px solid #ccc;
+                border-radius: 6px;
+                min-width: 80px;
+                text-align: center;
+            }
+            .key-conf-cell b { font-size: 18px; }
+            .key-conf-divider {
+                width: 16px;
+                border: none;
+                background: transparent;
+            }
             .fixation {
                 font-size: 48px;
                 color: #333;
@@ -800,8 +842,34 @@ function createExperimentHTML() {
                 <span class="key-left">Press <strong>${CONFIG.keys.categoryA.toUpperCase()}</strong> = ${label0}</span>
                 <span class="key-right">Press <strong>${CONFIG.keys.categoryB.toUpperCase()}</strong> = ${label1}</span>
             </div>
+            <div class="key-reminder-conf" id="key-reminder-conf" style="display: none;">
+                <div class="key-conf-cell"><b>S</b><br>Definitely ${label0}</div>
+                <div class="key-conf-cell"><b>D</b><br>Probably ${label0}</div>
+                <div class="key-conf-cell"><b>F</b><br>Maybe ${label0}</div>
+                <div class="key-conf-divider"></div>
+                <div class="key-conf-cell"><b>J</b><br>Maybe ${label1}</div>
+                <div class="key-conf-cell"><b>K</b><br>Probably ${label1}</div>
+                <div class="key-conf-cell"><b>L</b><br>Definitely ${label1}</div>
+            </div>
         </div>
     `;
+}
+
+function showAppropriateKeyReminder() {
+    // Show binary or 6-key reminder depending on phase + config
+    const binary = document.getElementById('key-reminder');
+    const conf = document.getElementById('key-reminder-conf');
+    if (!binary || !conf) return;
+    const useConf = ExperimentState.phase === "transfer" && CONFIG.confidence && CONFIG.confidence.enabled;
+    binary.style.display = useConf ? 'none' : 'flex';
+    conf.style.display = useConf ? 'flex' : 'none';
+}
+
+function hideKeyReminders() {
+    const binary = document.getElementById('key-reminder');
+    const conf = document.getElementById('key-reminder-conf');
+    if (binary) binary.style.display = 'none';
+    if (conf) conf.style.display = 'none';
 }
 
 function showStimulus(itemId) {
@@ -1062,12 +1130,11 @@ function showBlockBreak() {
     hideCursor();
 
     const stimContainer = document.getElementById('stimulus-container');
-    const keyReminder = document.getElementById('key-reminder');
     const feedbackDiv = document.getElementById('feedback');
     const startScreen = document.getElementById('start-screen');
 
     if (stimContainer) stimContainer.style.display = 'none';
-    if (keyReminder) keyReminder.style.display = 'none';
+    hideKeyReminders();
     if (feedbackDiv) feedbackDiv.textContent = '';
 
     // Re-use start screen for break
@@ -1133,18 +1200,18 @@ function runTransferTrial() {
     showStimulus(itemId);
     updateProgress();
 
-    // Set up response handler
-    ExperimentState.responseHandler = (response, rt) => {
-        handleTransferResponse(itemId, response, rt);
+    // Set up response handler — receives (category, rt, confidence?)
+    ExperimentState.responseHandler = (response, rt, confidence) => {
+        handleTransferResponse(itemId, response, rt, confidence);
     };
 
     // Set up timeout
     ExperimentState.timeoutId = setTimeout(() => {
-        handleTransferResponse(itemId, -1, CONFIG.transfer.maxResponseTime);
+        handleTransferResponse(itemId, -1, CONFIG.transfer.maxResponseTime, null);
     }, CONFIG.transfer.maxResponseTime);
 }
 
-function handleTransferResponse(itemId, response, rt) {
+function handleTransferResponse(itemId, response, rt, confidence) {
     // Stop accepting responses (prevents key presses during feedback/ITI)
     ExperimentState.acceptingResponse = false;
     ExperimentState.responseHandler = null;
@@ -1157,7 +1224,9 @@ function handleTransferResponse(itemId, response, rt) {
 
     const timeout = response === -1;
 
-    // Update alpha belief if valid response
+    // Update alpha belief if valid response. Belief update uses the BINARY
+    // category portion only — confidence is recorded for richer post-hoc
+    // analysis (ordered-probit) but doesn't change runtime ADO.
     if (!timeout) {
         updateAlphaBelief(itemId, response);
     }
@@ -1165,7 +1234,7 @@ function handleTransferResponse(itemId, response, rt) {
     // Get item metadata
     const item = ExperimentState.lookupTables.transfer_items.find(t => t.id === itemId);
 
-    // Log trial with full information
+    // Log trial with full information including confidence
     logTrial({
         phase: "transfer",
         itemId: itemId,
@@ -1173,6 +1242,7 @@ function handleTransferResponse(itemId, response, rt) {
         itemType: item?.item_type,
         diagnosticType: item?.diagnostic_type,
         response: response,
+        confidence: (typeof confidence === "number") ? confidence : null,
         timeout: timeout,
         rt: rt,
         alphaBelief: [...ExperimentState.alphaBelief],
@@ -1212,12 +1282,11 @@ function showTransferBreak() {
     hideCursor();
 
     const stimContainer = document.getElementById('stimulus-container');
-    const keyReminder = document.getElementById('key-reminder');
     const feedbackDiv = document.getElementById('feedback');
     const startScreen = document.getElementById('start-screen');
 
     if (stimContainer) stimContainer.style.display = 'none';
-    if (keyReminder) keyReminder.style.display = 'none';
+    hideKeyReminders();
     if (feedbackDiv) feedbackDiv.textContent = '';
 
     // Show break screen
@@ -1401,11 +1470,26 @@ function setupKeyHandler() {
         const rt = Date.now() - ExperimentState.trialStartTime;
 
         let response = null;
+        let confidence = null;
 
-        if (key === CONFIG.keys.categoryA) {
-            response = 0;  // Category A
-        } else if (key === CONFIG.keys.categoryB) {
-            response = 1;  // Category B
+        // In transfer phase with confidence enabled, accept the 6 confidence keys.
+        // Training phase always uses binary E/I.
+        const useConf = ExperimentState.phase === "transfer"
+                        && CONFIG.confidence
+                        && CONFIG.confidence.enabled;
+
+        if (useConf) {
+            const decoded = CONFIG.confidence.keyToResponse[key];
+            if (decoded) {
+                response = decoded.category;       // 0 (A) or 1 (B)
+                confidence = decoded.confidence;   // 1 (low), 2 (med), 3 (high)
+            }
+        } else {
+            if (key === CONFIG.keys.categoryA) {
+                response = 0;
+            } else if (key === CONFIG.keys.categoryB) {
+                response = 1;
+            }
         }
 
         if (response !== null) {
@@ -1413,7 +1497,7 @@ function setupKeyHandler() {
             ExperimentState.acceptingResponse = false;
             const handler = ExperimentState.responseHandler;
             ExperimentState.responseHandler = null;
-            handler(response, rt);
+            handler(response, rt, confidence);
         }
     });
 }
@@ -1422,12 +1506,11 @@ function showStartScreen() {
     console.log('[CategoryLearning] Showing start screen');
     const startScreen = document.getElementById('start-screen');
     const stimContainer = document.getElementById('stimulus-container');
-    const keyReminder = document.getElementById('key-reminder');
     const feedbackDiv = document.getElementById('feedback');
 
     if (startScreen) startScreen.style.display = 'block';
     if (stimContainer) stimContainer.style.display = 'none';
-    if (keyReminder) keyReminder.style.display = 'none';
+    hideKeyReminders();
     if (feedbackDiv) feedbackDiv.textContent = '';
     ExperimentState.waitingForStart = true;
 }
@@ -1455,11 +1538,10 @@ function startTrials() {
     console.log('[CategoryLearning] Starting trials');
     const startScreen = document.getElementById('start-screen');
     const stimContainer = document.getElementById('stimulus-container');
-    const keyReminder = document.getElementById('key-reminder');
 
     if (startScreen) startScreen.style.display = 'none';
     if (stimContainer) stimContainer.style.display = 'flex';
-    if (keyReminder) keyReminder.style.display = 'flex';
+    showAppropriateKeyReminder();
 
     // Hide cursor during trials
     hideCursor();
