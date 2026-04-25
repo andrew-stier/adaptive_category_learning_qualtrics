@@ -1,3 +1,4 @@
+
 // ============================================================================
 // CONFIGURATION - MODIFY THIS SECTION FOR YOUR EXPERIMENT
 // ============================================================================
@@ -55,8 +56,8 @@ const CONFIG = {
         minSpacing: 3,                    // Minimum items between repeats of same stimulus (for offline schedule fallback)
         minPresentations: 2,              // Minimum presentations per item (offline schedule only)
         maxPresentations: 8,              // Maximum presentations per item (offline schedule only)
-        adaptiveMaxPerItem: 12,           // Cap on per-item presentations under online ADO; prevents degenerate cycling
-        adaptiveSkipLastItem: true,       // Avoid presenting the same item twice in a row
+        adaptiveMaxPerItem: 8,            // Cap on per-item presentations under online ADO. Lower → more diverse coverage.
+        adaptiveAntiRecentK: 6,           // Don't repeat any item within the last K trials. Higher → less repetitive.
     },
 
     // Attention check parameters
@@ -623,28 +624,35 @@ function selectNextTransferItem() {
 
     // Online ADO: pick item with highest expected information gain about α
     // under the current posterior belief.
-    // - Cap each item at adaptiveMaxPerItem presentations to prevent degenerate
-    //   cycling on a single highest-IG item.
-    // - Soft anti-repetition: skip the immediately preceding item unless it is
-    //   strictly the most informative remaining option.
+    // - Cap each item at adaptiveMaxPerItem presentations.
+    // - Anti-recent-K window: exclude any item shown in the last K trials.
+    //   This eliminates the pair-alternation pattern that occurs when only
+    //   anti-back-to-back is enforced and the top-2 items dominate IG.
     const allItems = tables.transfer_items.map(item => item.id);
     const presentationCounts = {};
     for (const id of allItems) {
         presentationCounts[id] = ExperimentState.transferData.filter(t => t.itemId === id).length;
     }
 
-    const maxPerItem = CONFIG.transfer.adaptiveMaxPerItem || 12;
+    const maxPerItem = CONFIG.transfer.adaptiveMaxPerItem || 8;
     let available = allItems.filter(id => presentationCounts[id] < maxPerItem);
     if (available.length === 0) {
-        // All items hit the cap — relax it (shouldn't happen with default 32 items × 12 cap = 384 ≫ 128)
+        // All items hit the cap — relax it (shouldn't happen at the default cap=8 × 32 items = 256 ≫ 128)
         available = allItems;
     }
 
-    // Soft anti-back-to-back: skip the immediately preceding item if there's an alternative
-    const lastItem = ExperimentState.lastTransferItem;
-    if (CONFIG.transfer.adaptiveSkipLastItem && lastItem && available.length > 1) {
-        const filtered = available.filter(id => id !== lastItem);
+    // Anti-recent-K: exclude items shown in the last K transfer trials when an alternative exists
+    const recentK = CONFIG.transfer.adaptiveAntiRecentK || 0;
+    if (recentK > 0 && ExperimentState.transferData.length > 0) {
+        const recentItems = new Set(
+            ExperimentState.transferData
+                .slice(-recentK)
+                .map(t => t.itemId)
+        );
+        const filtered = available.filter(id => !recentItems.has(id));
         if (filtered.length > 0) available = filtered;
+        // If filtering left nothing (cap + recent rule both biting), use the
+        // unfiltered `available` from above.
     }
 
     let bestItem = available[0];
