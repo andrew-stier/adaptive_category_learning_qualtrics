@@ -27,18 +27,20 @@ const CONFIG = {
         categoryB: "i"   // Press I for Category B
     },
 
-    // Key bindings + confidence rating for TRANSFER phase
-    // S/D/F = category A (high → low confidence); J/K/L = category B (low → high)
+    // Key bindings + confidence rating for TRANSFER phase.
+    // Keeps fingers near their training-phase home positions (E for category A,
+    // I for category B): W/E/R = category A (high → low confidence), and
+    // U/I/O = category B (low → high confidence).
     confidence: {
         enabled: true,                         // false → fall back to binary E/I in transfer
         keyToResponse: {
             // key → {category: 0=A or 1=B, confidence: 1=low, 2=med, 3=high}
-            "s": { category: 0, confidence: 3 },  // Definitely A
-            "d": { category: 0, confidence: 2 },  // Probably A
-            "f": { category: 0, confidence: 1 },  // Maybe A
-            "j": { category: 1, confidence: 1 },  // Maybe B
-            "k": { category: 1, confidence: 2 },  // Probably B
-            "l": { category: 1, confidence: 3 }   // Definitely B
+            "w": { category: 0, confidence: 3 },  // Definitely A
+            "e": { category: 0, confidence: 2 },  // Probably A
+            "r": { category: 0, confidence: 1 },  // Maybe A
+            "u": { category: 1, confidence: 1 },  // Maybe B
+            "i": { category: 1, confidence: 2 },  // Probably B
+            "o": { category: 1, confidence: 3 }   // Definitely B
         },
         // Confidence-level labels for display (low → high)
         confLabels: ["Maybe", "Probably", "Definitely"]
@@ -343,7 +345,7 @@ function logTrial(data) {
         physicalFeatures: physicalFeatures,
     };
 
-    if (ExperimentState.phase === "training") {
+    if (ExperimentState.phase === "training" || ExperimentState.phase === "confidence_intro") {
         ExperimentState.trainingData.push(trialRecord);
     } else {
         ExperimentState.transferData.push(trialRecord);
@@ -792,25 +794,35 @@ function createExperimentHTML() {
             .key-reminder-conf {
                 display: flex;
                 justify-content: center;
+                align-items: stretch;
                 gap: 4px;
                 width: 100%;
-                max-width: 640px;
-                font-size: 13px;
+                max-width: 700px;
+                margin: 14px auto 0 auto;
                 color: #444;
-                margin-top: 14px;
-                flex-wrap: wrap;
+                flex-wrap: nowrap;          /* keep on one row */
+                box-sizing: border-box;
             }
             .key-conf-cell {
-                padding: 6px 10px;
+                flex: 1 1 0;                /* equal-share, can shrink */
+                padding: 4px 4px;
                 background-color: #ffffff;
                 border: 1px solid #ccc;
                 border-radius: 6px;
-                min-width: 80px;
                 text-align: center;
+                font-size: clamp(10px, 1.6vw, 13px);
+                line-height: 1.25;
+                min-width: 0;               /* allow shrinking inside flex */
+                box-sizing: border-box;
+                white-space: nowrap;
             }
-            .key-conf-cell b { font-size: 18px; }
+            .key-conf-cell b {
+                font-size: clamp(14px, 2.4vw, 18px);
+                display: block;
+                margin-bottom: 2px;
+            }
             .key-conf-divider {
-                width: 16px;
+                flex: 0 0 12px;
                 border: none;
                 background: transparent;
             }
@@ -843,24 +855,25 @@ function createExperimentHTML() {
                 <span class="key-right">Press <strong>${CONFIG.keys.categoryB.toUpperCase()}</strong> = ${label1}</span>
             </div>
             <div class="key-reminder-conf" id="key-reminder-conf" style="display: none;">
-                <div class="key-conf-cell"><b>S</b><br>Definitely ${label0}</div>
-                <div class="key-conf-cell"><b>D</b><br>Probably ${label0}</div>
-                <div class="key-conf-cell"><b>F</b><br>Maybe ${label0}</div>
+                <div class="key-conf-cell"><b>W</b><br>Definitely ${label0}</div>
+                <div class="key-conf-cell"><b>E</b><br>Probably ${label0}</div>
+                <div class="key-conf-cell"><b>R</b><br>Maybe ${label0}</div>
                 <div class="key-conf-divider"></div>
-                <div class="key-conf-cell"><b>J</b><br>Maybe ${label1}</div>
-                <div class="key-conf-cell"><b>K</b><br>Probably ${label1}</div>
-                <div class="key-conf-cell"><b>L</b><br>Definitely ${label1}</div>
+                <div class="key-conf-cell"><b>U</b><br>Maybe ${label1}</div>
+                <div class="key-conf-cell"><b>I</b><br>Probably ${label1}</div>
+                <div class="key-conf-cell"><b>O</b><br>Definitely ${label1}</div>
             </div>
         </div>
     `;
 }
 
 function showAppropriateKeyReminder() {
-    // Show binary or 6-key reminder depending on phase + config
+    // Show binary (training) or 6-key (confidence_intro / transfer) reminder
     const binary = document.getElementById('key-reminder');
     const conf = document.getElementById('key-reminder-conf');
     if (!binary || !conf) return;
-    const useConf = ExperimentState.phase === "transfer" && CONFIG.confidence && CONFIG.confidence.enabled;
+    const useConf = (ExperimentState.phase === "transfer" || ExperimentState.phase === "confidence_intro")
+                    && CONFIG.confidence && CONFIG.confidence.enabled;
     binary.style.display = useConf ? 'none' : 'flex';
     conf.style.display = useConf ? 'flex' : 'none';
 }
@@ -1183,6 +1196,158 @@ function endTrainingPhase(reason) {
 }
 
 // ============================================================================
+// CONFIDENCE-INTRO PHASE
+// 30 trials (3 blocks × 10) using only training items, with correct/wrong
+// feedback. Uses the 6-key confidence response. Same UI as transfer.
+// Purpose: introduce participants to confidence ratings while keeping their
+// recently-learned categories fresh.
+// ============================================================================
+
+const CONF_INTRO = {
+    blocksPerPhase: 3,
+    trialsPerBlock: 10,           // = number of training items
+    feedbackDurationMs: 1000,
+    itiDurationMs: 500,
+    timeoutExtraITIMs: 1000,
+    maxResponseTimeMs: 5000,
+    breakBetweenBlocks: true,
+};
+
+function runConfidenceIntroTrial() {
+    const trialsPerBlock = CONF_INTRO.trialsPerBlock;
+    const totalTrials = CONF_INTRO.blocksPerPhase * trialsPerBlock;
+
+    if (ExperimentState.trialNum >= totalTrials) {
+        endConfidenceIntroPhase();
+        return;
+    }
+
+    // Block boundaries
+    if (ExperimentState.blockTrials >= trialsPerBlock) {
+        endConfidenceIntroBlock();
+        return;
+    }
+
+    // Build a fresh shuffled queue at the start of each block
+    if (!ExperimentState.currentBlockSequence || ExperimentState.currentBlockSequence.length === 0) {
+        const trainingIds = ExperimentState.lookupTables.training_items.map(it => it.id);
+        ExperimentState.currentBlockSequence = shuffleArray(trainingIds);
+    }
+    const itemId = ExperimentState.currentBlockSequence.shift();
+    const item = ExperimentState.lookupTables.training_items.find(t => t.id === itemId);
+
+    showStimulus(itemId);
+    updateProgress();
+
+    ExperimentState.responseHandler = (response, rt, confidence) => {
+        handleConfidenceIntroResponse(itemId, item.category, response, rt, confidence);
+    };
+
+    ExperimentState.timeoutId = setTimeout(() => {
+        handleConfidenceIntroResponse(itemId, item.category, -1, CONF_INTRO.maxResponseTimeMs, null);
+    }, CONF_INTRO.maxResponseTimeMs);
+}
+
+function handleConfidenceIntroResponse(itemId, correctCategory, response, rt, confidence) {
+    ExperimentState.acceptingResponse = false;
+    ExperimentState.responseHandler = null;
+
+    if (ExperimentState.timeoutId) {
+        clearTimeout(ExperimentState.timeoutId);
+        ExperimentState.timeoutId = null;
+    }
+
+    const timeout = response === -1;
+    const correct = !timeout && response === correctCategory;
+
+    ExperimentState.blockTrials += 1;
+    ExperimentState.trialNum += 1;
+    if (correct) {
+        ExperimentState.blockCorrect += 1;
+        ExperimentState.totalCorrect += 1;
+    }
+
+    logTrial({
+        phase: "confidence_intro",
+        itemId: itemId,
+        correctCategory: correctCategory,
+        response: response,
+        confidence: (typeof confidence === "number") ? confidence : null,
+        correct: correct,
+        timeout: timeout,
+        rt: rt,
+    });
+
+    showFeedback(correct, timeout);
+
+    const itiDuration = timeout
+        ? CONF_INTRO.itiDurationMs + CONF_INTRO.timeoutExtraITIMs
+        : CONF_INTRO.itiDurationMs;
+
+    setTimeout(() => {
+        clearFeedback();
+        showFixation();
+        setTimeout(runConfidenceIntroTrial, itiDuration);
+    }, CONF_INTRO.feedbackDurationMs);
+}
+
+function endConfidenceIntroBlock() {
+    ExperimentState.blockNum += 1;
+    ExperimentState.blockTrials = 0;
+    ExperimentState.blockCorrect = 0;
+    ExperimentState.currentBlockSequence = null;
+
+    if (CONF_INTRO.breakBetweenBlocks &&
+        ExperimentState.blockNum < CONF_INTRO.blocksPerPhase) {
+        showBlockBreak();
+    } else {
+        runConfidenceIntroTrial();
+    }
+}
+
+function endConfidenceIntroPhase() {
+    const accuracy = ExperimentState.trialNum > 0
+        ? ExperimentState.totalCorrect / ExperimentState.trialNum
+        : 0;
+    console.log(`[CategoryLearning] Confidence-intro complete, accuracy: ${(accuracy * 100).toFixed(1)}%`);
+
+    showCursor();
+
+    // Save the confidence-intro trial data to a separate embedded data field
+    if (typeof Qualtrics !== 'undefined') {
+        try {
+            Qualtrics.SurveyEngine.setEmbeddedData(
+                'confidence_intro_data',
+                JSON.stringify({
+                    participantId: ExperimentState.participantId,
+                    counterbalance: ExperimentState.counterbalance,
+                    trials: ExperimentState.trainingData.filter(t => t.phase === "confidence_intro"),
+                    summary: {
+                        totalTrials: ExperimentState.trialNum,
+                        accuracy: accuracy,
+                    }
+                })
+            );
+            Qualtrics.SurveyEngine.setEmbeddedData('confidence_intro_accuracy', accuracy);
+        } catch (e) {
+            console.warn('[CategoryLearning] Could not save confidence_intro_data:', e);
+        }
+    }
+
+    setTimeout(function() {
+        if (typeof ExperimentState.proceedToNextPage === 'function') {
+            ExperimentState.proceedToNextPage();
+        } else if (ExperimentState.questionContext &&
+                   typeof ExperimentState.questionContext.clickNextButton === 'function') {
+            ExperimentState.questionContext.clickNextButton();
+        } else {
+            const nextBtn = document.getElementById('NextButton');
+            if (nextBtn) nextBtn.click();
+        }
+    }, 100);
+}
+
+// ============================================================================
 // TRANSFER PHASE
 // ============================================================================
 
@@ -1447,6 +1612,8 @@ function setupKeyHandler() {
             }
             if (ExperimentState.phase === 'training') {
                 endTrainingPhase('debug_skip');
+            } else if (ExperimentState.phase === 'confidence_intro') {
+                endConfidenceIntroPhase();
             } else if (ExperimentState.phase === 'transfer') {
                 endTransferPhase();
             }
@@ -1472,9 +1639,10 @@ function setupKeyHandler() {
         let response = null;
         let confidence = null;
 
-        // In transfer phase with confidence enabled, accept the 6 confidence keys.
+        // confidence_intro and transfer phases use the 6 confidence keys.
         // Training phase always uses binary E/I.
-        const useConf = ExperimentState.phase === "transfer"
+        const useConf = (ExperimentState.phase === "transfer"
+                         || ExperimentState.phase === "confidence_intro")
                         && CONFIG.confidence
                         && CONFIG.confidence.enabled;
 
@@ -1551,6 +1719,8 @@ function startTrials() {
     setTimeout(() => {
         if (ExperimentState.phase === "training") {
             runTrainingTrial();
+        } else if (ExperimentState.phase === "confidence_intro") {
+            runConfidenceIntroTrial();
         } else {
             runTransferTrial();
         }
@@ -1635,6 +1805,14 @@ async function initializeExperiment(phase) {
         ExperimentState.currentBlockSequence = null;
         ExperimentState.blockItemCounts = {};
         ExperimentState.lastTrainingItem = null;
+    } else if (phase === "confidence_intro") {
+        // Reset block/trial counters but keep counterbalance + alpha belief from training
+        ExperimentState.blockNum = 0;
+        ExperimentState.blockTrials = 0;
+        ExperimentState.blockCorrect = 0;
+        ExperimentState.totalCorrect = 0;
+        ExperimentState.currentBlockSequence = null;
+        // Keep ExperimentState.trainingData accumulating; we'll filter to phase later
     }
 
     // Initialize alpha belief - needed for:
