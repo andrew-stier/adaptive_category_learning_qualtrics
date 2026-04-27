@@ -76,10 +76,12 @@ const CONFIG = {
         minPresentations: 2,              // Minimum presentations per item (offline schedule only)
         maxPresentations: 8,              // Maximum presentations per item (offline schedule only)
         adaptiveMaxPerItem: 8,            // Cap on per-item presentations under online ADO. Lower → more diverse coverage.
-        adaptiveAntiRecentK: 6,           // Don't repeat any item within the last K trials. Higher → less repetitive.
+        adaptiveAntiRecentK: 12,          // Don't repeat any item within the last K trials. Higher → less repetitive.
         adaptiveMinCoverageTarget: 20,    // Growing min-coverage rule: at trial t, no item may exceed floor(t/N)+1 presentations.
                                           //   N=20 ⇒ all 20 highest-IG items shown ≥ 1× by trial 20, ≥ 2× by trial 40, etc.
                                           //   Stops the early "AB-CD-AB" concentration on a few high-IG items.
+        adaptiveTopK: 4,                  // Sample uniformly from the K highest-IG eligible items rather than strict argmax.
+                                          //   Breaks the deterministic "same opening sequence each segment" pattern. K=1 = pure argmax.
     },
 
     // Attention check parameters
@@ -100,7 +102,7 @@ const CONFIG = {
 const LOOKUP_TABLES = null;  // Will be loaded from URL if null
 
 // Option 2: Load from external URL
-const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=8";
+const LOOKUP_TABLES_URL = "https://andrew-stier.github.io/adaptive_category_learning_qualtrics/lookup_tables_minimal.json?v=9";
 
 // ============================================================================
 // EXPERIMENT STATE
@@ -689,20 +691,26 @@ function selectNextTransferItem() {
         // unfiltered `available` from above.
     }
 
-    let bestItem = available[0];
-    let bestIG = -Infinity;
+    // Score each eligible item, then sample uniformly from the K highest-IG items.
+    // Strict argmax (K=1) caused identical opening sequences after every break
+    // because belief changes only marginally over 20 trials, so the top-IG item
+    // is the same across consecutive segments. K>1 breaks that pattern.
+    const scored = available.map(itemId => ({
+        itemId,
+        ig: computeInformationGain(itemId),
+    }));
+    scored.sort((a, b) => b.ig - a.ig);
 
-    for (const itemId of available) {
-        const ig = computeInformationGain(itemId);
-        if (ig > bestIG) {
-            bestIG = ig;
-            bestItem = itemId;
-        }
-    }
+    const topK = Math.max(1, CONFIG.transfer.adaptiveTopK || 1);
+    const candidates = scored.slice(0, Math.min(topK, scored.length));
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    const bestItem = pick.itemId;
+    const bestIG = pick.ig;
 
     ExperimentState.lastTransferItem = bestItem;
     const count = presentationCounts[bestItem] + 1;
-    console.log(`[CategoryLearning] Adaptive: selected ${bestItem} (presentation #${count}) with info gain ${bestIG.toFixed(6)}`);
+    const topIG = scored[0].ig;
+    console.log(`[CategoryLearning] Adaptive: selected ${bestItem} (presentation #${count}) IG=${bestIG.toFixed(6)} (top-${candidates.length} sample; max IG=${topIG.toFixed(6)})`);
     return bestItem;
 }
 
