@@ -1,3 +1,55 @@
+/**
+ * Adaptive Category Learning Experiment for Qualtrics
+ *
+ * Version: v6 (2026-10-03) — points + Prolific bonus. Training: +1 correct /
+ * −1 wrong-or-timeout (floored at 0), plus a 400-pt mastery bonus that drops
+ * 10 per block and is claimed on reaching criterion. Transfer: hidden until
+ * the end, 200 × max(0, 2·acc − 1) on OLD items only (novel items and
+ * confidence never scored). $0.10 per 100 points. New embedded data fields:
+ * points_training_trials, points_mastery_bonus, points_training,
+ * points_transfer, transfer_old_accuracy, points_total, bonus_usd.
+ * Bump experiment.js cache-buster in Qualtrics to ?v=6.
+ *
+ * v5 (2026-04-27) — randomize ADO selection over top-K eligible items
+ * (K=4) instead of strict argmax, and bump anti-recent K from 6 to 12. Fixes
+ * the "same first 5 items after every transfer break" pattern observed in
+ * sessions 2-4 even with the sharper lookup. Also bumps lookup cache-buster
+ * (?v=8 → ?v=9). Bump experiment.js cache-buster in Qualtrics to ?v=5.
+ *
+ * v4 (2026-04-25) — added growing min-coverage rule to online ADO so
+ * early transfer blocks aren't dominated by the few highest-IG items.
+ *
+ * v2 (2026-04-25) — added 6-key confidence ratings for transfer phase.
+ * Training still uses binary E/I; transfer uses S/D/F (Vekki, high→low conf)
+ * and J/K/L (Boula, low→high conf). Per-trial confidence is logged alongside
+ * the binary category response.
+ *
+ * This code implements a category learning experiment with:
+ * - Fixed training phase (to criterion or max trials)
+ * - Adaptive transfer phase (using precomputed lookup tables)
+ * - Full data logging for HDP model fitting
+ *
+ * Setup Instructions:
+ * 1. Create a Qualtrics survey with the following structure:
+ *    - Q1: Instructions (Text/Graphic)
+ *    - Q2: Training Phase (Text/Graphic with JS)
+ *    - Q3: Transfer Instructions (Text/Graphic)
+ *    - Q4: Transfer Phase (Text/Graphic with JS)
+ *    - Q5: Demographics
+ *
+ * 2. In the Survey Flow, add Embedded Data fields:
+ *    - training_data (text, 20000 chars)
+ *    - transfer_data (text, 20000 chars)
+ *    - alpha_estimate (number)
+ *    - training_accuracy (number)
+ *    - experiment_complete (number)
+ *
+ * 3. Add this JavaScript to Q2 and Q4 (training and transfer)
+ *
+ * 4. Upload your stimulus images to Qualtrics or host externally
+ *
+ * 5. Upload lookup_tables.json to a public URL or embed in the code
+ */
 
 // ============================================================================
 // CONFIGURATION - MODIFY THIS SECTION FOR YOUR EXPERIMENT
@@ -84,6 +136,19 @@ const CONFIG = {
                                           //   Breaks the deterministic "same opening sequence each segment" pattern. K=1 = pure argmax.
     },
 
+    // Points + bonus. Training points are shown live; transfer points are
+    // hidden until the end. Confidence never affects points.
+    points: {
+        enabled: true,
+        trainingCorrect: 1,               // per correct training trial
+        trainingWrong: -1,                // per wrong OR timed-out training trial (running total floored at 0)
+        masteryBonusStart: 400,           // = maxBlocks × trialsPerBlock, so bonus claimed = trials skipped
+        masteryBonusDropPerBlock: 10,     // dropped at the end of every training block (incl. the last one)
+        transferMax: 200,                 // transfer pts = round(transferMax × max(0, 2·acc_old − 1)); timeouts count wrong
+        usdPer100Points: 0.10,            // bonus_usd = total × usdPer100Points / 100, rounded to cents
+        showMasteryProgress: true,        // show ●●○ progress toward criterion on training break screens
+    },
+
     // Attention check parameters
     attentionChecks: {
         enabled: true,
@@ -135,6 +200,10 @@ const ExperimentState = {
 
     // Lookup tables
     lookupTables: null,
+
+    // Points (see CONFIG.points). Reset at the start of training.
+    points: null,
+    spaceCallback: null,      // if set, SPACEBAR on a waiting screen calls this instead of startTrials()
 
     // Counterbalancing
     counterbalance: null,     // Stores dimension order, polarity flips, label swap
@@ -750,6 +819,116 @@ function estimateAlpha() {
 }
 
 // ============================================================================
+// POINTS + BONUS
+// ============================================================================
+
+function pointsEnabled() {
+    return !!(CONFIG.points && CONFIG.points.enabled);
+}
+
+function resetPoints() {
+    ExperimentState.points = {
+        trialPoints: 0,                                   // running ±1 total (floored at 0)
+        masteryBonus: CONFIG.points.masteryBonusStart,    // remaining mastery bonus
+        masteryClaimed: 0,                                // bonus claimed at criterion (0 if never reached)
+        transferOldN: 0,                                  // scored (old-item) transfer trials
+        transferOldCorrect: 0,
+        transferPoints: 0,
+    };
+}
+
+/**
+ * Apply one training trial's points. Returns the actual change (may be 0 when
+ * a wrong answer hits the floor), which is what we display and log.
+ */
+function awardTrainingTrialPoints(correct) {
+    const p = ExperimentState.points;
+    const nominal = correct ? CONFIG.points.trainingCorrect : CONFIG.points.trainingWrong;
+    const before = p.trialPoints;
+    p.trialPoints = Math.max(0, before + nominal);
+    return p.trialPoints - before;
+}
+
+function trainingPointsTotal() {
+    const p = ExperimentState.points;
+    return p ? p.trialPoints + p.masteryClaimed : 0;
+}
+
+/**
+ * Map each OLD transfer item id → its training category (matched by abstract
+ * features). Novel items are absent from the map and are never scored.
+ */
+function buildOldItemCategoryMap() {
+    const tables = ExperimentState.lookupTables;
+    const byFeatures = {};
+    for (const it of tables.training_items) byFeatures[it.features.join('')] = it.category;
+    const map = {};
+    for (const it of tables.transfer_items) {
+        const cat = byFeatures[it.features.join('')];
+        if (it.item_type === 'old' && cat !== undefined) map[it.id] = cat;
+    }
+    return map;
+}
+
+function computeTransferPoints() {
+    const p = ExperimentState.points;
+    if (!p || p.transferOldN === 0) return 0;
+    const acc = p.transferOldCorrect / p.transferOldN;
+    return Math.round(CONFIG.points.transferMax * Math.max(0, 2 * acc - 1));
+}
+
+function pointsToUsd(totalPoints) {
+    // Round to whole cents
+    return Math.round(totalPoints * CONFIG.points.usdPer100Points) / 100;
+}
+
+function formatUsd(x) {
+    return '$' + x.toFixed(2);
+}
+
+function setEmbedded(field, value) {
+    if (typeof Qualtrics !== 'undefined') {
+        Qualtrics.SurveyEngine.setEmbeddedData(field, value);
+    }
+}
+
+function updatePointsBar() {
+    const bar = document.getElementById('points-bar');
+    if (!bar || !ExperimentState.points) return;
+    bar.innerHTML = `Points: <strong>${ExperimentState.points.trialPoints}</strong>` +
+                    `<span class="points-bar-sep"></span>` +
+                    `Mastery bonus: <strong>${ExperimentState.points.masteryBonus}</strong>`;
+}
+
+function masteryProgressDots() {
+    const n = CONFIG.training.criterionBlocks;
+    const k = Math.min(ExperimentState.consecutiveCriterionBlocks, n);
+    return '●'.repeat(k) + '○'.repeat(n - k);
+}
+
+/**
+ * Show a message on the start/break screen and wait for SPACEBAR. If
+ * onContinue is given it runs on SPACEBAR; otherwise trials resume.
+ */
+function showSpacebarScreen(html, onContinue) {
+    hideCursor();
+    const stimContainer = document.getElementById('stimulus-container');
+    const feedbackDiv = document.getElementById('feedback');
+    const startScreen = document.getElementById('start-screen');
+
+    if (stimContainer) stimContainer.style.display = 'none';
+    hideKeyReminders();
+    if (feedbackDiv) feedbackDiv.textContent = '';
+
+    if (startScreen) {
+        startScreen.innerHTML = html;
+        startScreen.style.display = 'block';
+    }
+    ExperimentState.spaceCallback = onContinue || null;
+    ExperimentState.waitingForStart = true;
+}
+
+// ============================================================================
 // TRIAL PRESENTATION
 // ============================================================================
 
@@ -864,8 +1043,33 @@ function createExperimentHTML() {
                 color: #666;
             }
             .hidden { display: none; }
+            .points-bar {
+                font-size: 16px;
+                color: #444;
+                margin-top: 10px;
+            }
+            .points-bar-sep {
+                display: inline-block;
+                width: 40px;
+            }
+            .points-summary {
+                display: inline-block;
+                text-align: left;
+                font-size: 18px;
+                line-height: 1.8;
+                margin: 10px 0 20px 0;
+            }
+            .points-summary td { padding: 0 12px; }
+            .points-summary td.num { text-align: right; font-weight: bold; }
+            .points-summary tr.total td { border-top: 1px solid #999; }
+            .mastery-dots {
+                font-size: 22px;
+                letter-spacing: 4px;
+                color: #4a4;
+            }
         </style>
         <div class="exp-container" id="exp-container">
+            <div class="points-bar" id="points-bar" style="display: none;"></div>
             <div class="start-screen" id="start-screen">
                 <span class="fixation">+</span>
                 <div class="start-prompt">Press <strong>SPACEBAR</strong> to begin</div>
@@ -899,13 +1103,23 @@ function showAppropriateKeyReminder() {
                     && CONFIG.confidence && CONFIG.confidence.enabled;
     binary.style.display = useConf ? 'none' : 'flex';
     conf.style.display = useConf ? 'flex' : 'none';
+
+    // Live points bar: training only (transfer points stay hidden until the end)
+    const bar = document.getElementById('points-bar');
+    if (bar) {
+        const showBar = ExperimentState.phase === "training" && pointsEnabled() && ExperimentState.points;
+        bar.style.display = showBar ? 'block' : 'none';
+        if (showBar) updatePointsBar();
+    }
 }
 
 function hideKeyReminders() {
     const binary = document.getElementById('key-reminder');
     const conf = document.getElementById('key-reminder-conf');
+    const bar = document.getElementById('points-bar');
     if (binary) binary.style.display = 'none';
     if (conf) conf.style.display = 'none';
+    if (bar) bar.style.display = 'none';
 }
 
 function showStimulus(itemId) {
@@ -921,18 +1135,25 @@ function showStimulus(itemId) {
     ExperimentState.acceptingResponse = true;
 }
 
-function showFeedback(correct, timeout = false) {
+function showFeedback(correct, timeout = false, pointsDelta = null) {
     const feedbackDiv = document.getElementById("feedback");
     if (!feedbackDiv) return;
 
+    // Points suffix, e.g. "Correct! +1" / "Wrong −1". Omitted when no points
+    // changed (floor at 0) or outside the points-scored training phase.
+    let suffix = '';
+    if (typeof pointsDelta === 'number' && pointsDelta !== 0) {
+        suffix = pointsDelta > 0 ? `  +${pointsDelta}` : `  −${-pointsDelta}`;
+    }
+
     if (timeout) {
-        feedbackDiv.textContent = "Too slow!";
+        feedbackDiv.textContent = "Too slow!" + suffix;
         feedbackDiv.className = "feedback timeout";
     } else if (correct) {
-        feedbackDiv.textContent = "Correct!";
+        feedbackDiv.textContent = "Correct!" + suffix;
         feedbackDiv.className = "feedback correct";
     } else {
-        feedbackDiv.textContent = "Wrong";
+        feedbackDiv.textContent = "Wrong" + suffix;
         feedbackDiv.className = "feedback incorrect";
     }
 }
@@ -1090,6 +1311,9 @@ function handleTrainingResponse(itemId, correctCategory, response, rt) {
         ExperimentState.totalCorrect++;
     }
 
+    // Points: timeouts count as wrong
+    const pointsDelta = pointsEnabled() ? awardTrainingTrialPoints(correct) : null;
+
     // Log trial
     logTrial({
         phase: "training",
@@ -1099,10 +1323,14 @@ function handleTrainingResponse(itemId, correctCategory, response, rt) {
         correct: correct,
         timeout: timeout,
         rt: rt,
+        pointsDelta: pointsDelta,
+        trialPoints: pointsEnabled() ? ExperimentState.points.trialPoints : null,
+        masteryBonus: pointsEnabled() ? ExperimentState.points.masteryBonus : null,
     });
 
     // Show feedback
-    showFeedback(correct, timeout);
+    showFeedback(correct, timeout, pointsDelta);
+    if (pointsEnabled()) updatePointsBar();
 
     // Continue to next trial after feedback (extra ITI if timeout)
     const itiDuration = timeout
@@ -1128,14 +1356,33 @@ function endTrainingBlock() {
         ExperimentState.consecutiveCriterionBlocks = 0;
     }
 
+    // Mastery bonus drops at the end of every block, before any claim, so the
+    // claimed amount = masteryBonusStart − dropPerBlock × blocks completed.
+    const blockCorrectCount = ExperimentState.blockCorrect;
+    let bonusBefore = null;
+    if (pointsEnabled()) {
+        const p = ExperimentState.points;
+        bonusBefore = p.masteryBonus;
+        p.masteryBonus = Math.max(0, p.masteryBonus - CONFIG.points.masteryBonusDropPerBlock);
+    }
+
     // Check if training is complete
     if (ExperimentState.consecutiveCriterionBlocks >= CONFIG.training.criterionBlocks) {
-        endTrainingPhase("criterion");
+        if (pointsEnabled()) {
+            ExperimentState.points.masteryClaimed = ExperimentState.points.masteryBonus;
+            showTrainingSummary("criterion");
+        } else {
+            endTrainingPhase("criterion");
+        }
         return;
     }
 
     if (ExperimentState.blockNum >= CONFIG.training.maxBlocks - 1) {
-        endTrainingPhase("max_blocks");
+        if (pointsEnabled()) {
+            showTrainingSummary("max_blocks");
+        } else {
+            endTrainingPhase("max_blocks");
+        }
         return;
     }
 
@@ -1152,7 +1399,9 @@ function endTrainingBlock() {
     }
 
     // Show break screen or continue immediately
-    if (CONFIG.training.breakBetweenBlocks) {
+    if (CONFIG.training.breakBetweenBlocks && pointsEnabled()) {
+        showTrainingPointsBreak(blockCorrectCount, bonusBefore);
+    } else if (CONFIG.training.breakBetweenBlocks) {
         showBlockBreak();
     } else {
         runTrainingTrial();
@@ -1184,6 +1433,49 @@ function showBlockBreak() {
     ExperimentState.waitingForStart = true;
 }
 
+function showTrainingPointsBreak(blockCorrectCount, bonusBefore) {
+    const p = ExperimentState.points;
+    const completedBlock = ExperimentState.blockNum;   // already incremented → 1-indexed count of completed blocks
+    const dots = CONFIG.points.showMasteryProgress
+        ? `<div style="margin-bottom: 14px;">Mastery progress: <span class="mastery-dots">${masteryProgressDots()}</span></div>`
+        : '';
+    showSpacebarScreen(`
+        <span class="fixation">+</span>
+        <div class="start-prompt">
+            <div style="margin-bottom: 10px;">Block ${completedBlock} complete: ${blockCorrectCount}/${CONFIG.training.trialsPerBlock} correct</div>
+            <table class="points-summary">
+                <tr><td>Points</td><td class="num">${p.trialPoints}</td></tr>
+                <tr><td>Mastery bonus</td><td class="num">${bonusBefore} &rarr; ${p.masteryBonus}</td></tr>
+            </table>
+            ${dots}
+            <div style="margin-bottom: 20px;">Master the categories to claim your bonus.<br>It drops by ${CONFIG.points.masteryBonusDropPerBlock} after every block.</div>
+            Press <strong>SPACEBAR</strong> to continue
+        </div>
+    `);
+}
+
+function showTrainingSummary(reason) {
+    const p = ExperimentState.points;
+    const header = reason === "criterion"
+        ? `<h2 style="color: #4a4; margin: 10px 0;">Categories mastered!</h2>`
+        : `<h2 style="margin: 10px 0;">Training complete</h2>`;
+    const note = reason === "criterion"
+        ? ''
+        : `<div style="margin-bottom: 20px;">The mastery bonus has run out, but you keep your points.</div>`;
+    showSpacebarScreen(`
+        <div class="start-prompt">
+            ${header}
+            <table class="points-summary">
+                <tr><td>Points</td><td class="num">${p.trialPoints}</td></tr>
+                <tr><td>Mastery bonus</td><td class="num">+ ${p.masteryClaimed}</td></tr>
+                <tr class="total"><td>Training total</td><td class="num">${trainingPointsTotal()}</td></tr>
+            </table>
+            ${note}
+            <div>Press <strong>SPACEBAR</strong> to continue</div>
+        </div>
+    `, () => endTrainingPhase(reason));
+}
+
 function endTrainingPhase(reason) {
     const finalAccuracy = ExperimentState.trialNum > 0
         ? ExperimentState.totalCorrect / ExperimentState.trialNum
@@ -1200,6 +1492,11 @@ function endTrainingPhase(reason) {
     // Signal completion to Qualtrics
     if (typeof Qualtrics !== 'undefined') {
         Qualtrics.SurveyEngine.setEmbeddedData('training_accuracy', finalAccuracy);
+    }
+    if (pointsEnabled() && ExperimentState.points) {
+        setEmbedded('points_training_trials', ExperimentState.points.trialPoints);
+        setEmbedded('points_mastery_bonus', ExperimentState.points.masteryClaimed);
+        setEmbedded('points_training', trainingPointsTotal());
     }
 
     // Click next button - use bound proceed function (like MinnoJS working code)
@@ -1422,6 +1719,16 @@ function handleTransferResponse(itemId, response, rt, confidence) {
     // Get item metadata
     const item = ExperimentState.lookupTables.transfer_items.find(t => t.id === itemId);
 
+    // Hidden points: only OLD items (known category) are scored, timeouts
+    // count as wrong, confidence is ignored. Novel items are never scored.
+    let oldCorrect = null;
+    if (pointsEnabled() && ExperimentState.points && ExperimentState.oldItemCategory &&
+        ExperimentState.oldItemCategory[itemId] !== undefined) {
+        oldCorrect = !timeout && response === ExperimentState.oldItemCategory[itemId];
+        ExperimentState.points.transferOldN += 1;
+        if (oldCorrect) ExperimentState.points.transferOldCorrect += 1;
+    }
+
     // Log trial with full information including confidence
     logTrial({
         phase: "transfer",
@@ -1435,6 +1742,8 @@ function handleTransferResponse(itemId, response, rt, confidence) {
         rt: rt,
         alphaBelief: [...ExperimentState.alphaBelief],
         informationGain: computeInformationGain(itemId),
+        scoredOld: oldCorrect !== null,
+        oldCorrect: oldCorrect,
     });
 
     ExperimentState.trialNum++;
@@ -1478,10 +1787,13 @@ function showTransferBreak() {
     if (feedbackDiv) feedbackDiv.textContent = '';
 
     // Show break screen
+    const pointsNote = pointsEnabled()
+        ? '<br><br>Your points for this part will be shown at the end.'
+        : '';
     if (startScreen) {
         startScreen.innerHTML = `
             <span class="fixation">+</span>
-            <div class="start-prompt">Take a short break<br><br>Press <strong>SPACEBAR</strong> to continue</div>
+            <div class="start-prompt">Take a short break${pointsNote}<br><br>Press <strong>SPACEBAR</strong> to continue</div>
         `;
         startScreen.style.display = 'block';
     }
@@ -1504,6 +1816,18 @@ function endTransferPhase() {
         jQuery('body').css('background-color', '');
     }
 
+    // Transfer points (hidden until now) + final bonus
+    if (pointsEnabled() && ExperimentState.points) {
+        const p = ExperimentState.points;
+        p.transferPoints = computeTransferPoints();
+        const total = trainingPointsTotal() + p.transferPoints;
+        const oldAcc = p.transferOldN > 0 ? p.transferOldCorrect / p.transferOldN : null;
+        setEmbedded('points_transfer', p.transferPoints);
+        setEmbedded('transfer_old_accuracy', oldAcc === null ? '' : oldAcc);
+        setEmbedded('points_total', total);
+        setEmbedded('bonus_usd', pointsToUsd(total).toFixed(2));
+    }
+
     // Save transfer data to Qualtrics
     saveTransferData(alphaEstimate);
 
@@ -1513,6 +1837,34 @@ function endTransferPhase() {
         Qualtrics.SurveyEngine.setEmbeddedData('experiment_complete', 1);
     }
 
+    if (pointsEnabled() && ExperimentState.points) {
+        showFinalPointsSummary();
+    } else {
+        advanceAfterTransfer();
+    }
+}
+
+function showFinalPointsSummary() {
+    const p = ExperimentState.points;
+    const total = trainingPointsTotal() + p.transferPoints;
+    showCursor();
+    showSpacebarScreen(`
+        <div class="start-prompt">
+            <h2 style="margin: 10px 0;">Task complete!</h2>
+            <table class="points-summary">
+                <tr><td>Training points</td><td class="num">${trainingPointsTotal()}</td></tr>
+                <tr><td>Final-part points</td><td class="num">+ ${p.transferPoints}</td></tr>
+                <tr class="total"><td>Total points</td><td class="num">${total}</td></tr>
+                <tr><td>Bonus</td><td class="num">${formatUsd(pointsToUsd(total))}</td></tr>
+            </table>
+            <div style="margin-bottom: 20px;">Your bonus will be paid through Prolific after the study closes.</div>
+            <div>Press <strong>SPACEBAR</strong> to continue</div>
+        </div>
+    `, advanceAfterTransfer);
+    showCursor();   // showSpacebarScreen hides it; keep visible on the final screen
+}
+
+function advanceAfterTransfer() {
     // Show completion message
     const container = ExperimentState.containerElement || document.getElementById('exp-container');
     if (container) {
@@ -1573,6 +1925,11 @@ function saveTrainingData(accuracy, reason) {
             totalBlocks: ExperimentState.blockNum + 1,
             finalAccuracy: accuracy,
             completionReason: reason,
+            points: ExperimentState.points ? {
+                trialPoints: ExperimentState.points.trialPoints,
+                masteryClaimed: ExperimentState.points.masteryClaimed,
+                trainingTotal: trainingPointsTotal(),
+            } : null,
         }
     };
 
@@ -1592,6 +1949,13 @@ function saveTransferData(alphaEstimate) {
         participantId: ExperimentState.participantId,
         counterbalance: ExperimentState.counterbalance,
         trials: ExperimentState.transferData,
+        points: ExperimentState.points ? {
+            transferOldN: ExperimentState.points.transferOldN,
+            transferOldCorrect: ExperimentState.points.transferOldCorrect,
+            transferPoints: ExperimentState.points.transferPoints,
+            trainingTotal: trainingPointsTotal(),
+            total: trainingPointsTotal() + ExperimentState.points.transferPoints,
+        } : null,
         alphaEstimate: alphaEstimate,
         alphaValues: ExperimentState.alphaValues,
         finalBelief: ExperimentState.alphaBelief,
@@ -1628,6 +1992,8 @@ function setupKeyHandler() {
             event.preventDefault();
             console.log('[CategoryLearning] DEBUG: Skipping remaining trials');
             ExperimentState.responseHandler = null;
+            ExperimentState.spaceCallback = null;
+            ExperimentState.waitingForStart = false;
             // Clear any pending timeout
             if (ExperimentState.timeoutId) {
                 clearTimeout(ExperimentState.timeoutId);
@@ -1648,7 +2014,13 @@ function setupKeyHandler() {
             event.preventDefault();
             if (ExperimentState.waitingForStart) {
                 ExperimentState.waitingForStart = false;
-                startTrials();
+                const cb = ExperimentState.spaceCallback;
+                ExperimentState.spaceCallback = null;
+                if (typeof cb === 'function') {
+                    cb();
+                } else {
+                    startTrials();
+                }
                 return;
             }
         }
@@ -1809,6 +2181,31 @@ async function initializeExperiment(phase) {
     // Set phase
     ExperimentState.phase = phase;
     ExperimentState.trialNum = 0;
+    ExperimentState.spaceCallback = null;
+
+    // Points state
+    if (pointsEnabled()) {
+        ExperimentState.oldItemCategory = buildOldItemCategoryMap();
+        if (phase === "training") {
+            resetPoints();
+        } else if (!ExperimentState.points) {
+            // In-memory state lost (e.g. page reload): recover training points
+            // from embedded data so the final total is still correct.
+            resetPoints();
+            if (typeof Qualtrics !== 'undefined') {
+                ExperimentState.points.trialPoints =
+                    Number(Qualtrics.SurveyEngine.getEmbeddedData('points_training_trials')) || 0;
+                ExperimentState.points.masteryClaimed =
+                    Number(Qualtrics.SurveyEngine.getEmbeddedData('points_mastery_bonus')) || 0;
+            }
+            console.warn('[CategoryLearning] Points state missing; recovered training points from embedded data:', trainingPointsTotal());
+        }
+        if (phase === "transfer") {
+            ExperimentState.points.transferOldN = 0;
+            ExperimentState.points.transferOldCorrect = 0;
+            ExperimentState.points.transferPoints = 0;
+        }
+    }
 
     // Reset phase-specific state
     if (phase === "transfer") {
