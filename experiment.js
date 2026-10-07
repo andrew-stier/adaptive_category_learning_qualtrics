@@ -12,6 +12,10 @@
  * v6.1 (2026-10-07): training break screens show only mastery progress + SPACEBAR.
  * v6.2 (2026-10-07): transfer RT < 100 ms → "Too fast!" warning; trial logged with
  *   tooFast=true, excluded from α update, counted wrong if a scored old item.
+ * v7 (2026-10-07): BUGFIX — the document keydown listener persisted after the
+ *   task and swallowed SPACEBAR in every later text box ("Everythingworkswell").
+ *   Now ignores keys typed in inputs/textareas and only blocks SPACEBAR while
+ *   the task is on screen. Use cache-buster ?v=7 on all three task questions.
  *
  * v5 (2026-04-27) — randomize ADO selection over top-K eligible items
  * (K=4) instead of strict argmax, and bump anti-recent K from 6 to 12. Fixes
@@ -2004,6 +2008,14 @@ function setupKeyHandler() {
         // Ignore key repeats (holding down a key)
         if (event.repeat) return;
 
+        // This listener stays on the document for the rest of the survey.
+        // Never touch keys typed into text boxes on later Qualtrics pages.
+        const target = event.target;
+        if (target && (target.isContentEditable ||
+                       /^(input|textarea|select)$/i.test(target.tagName || ''))) {
+            return;
+        }
+
         const key = event.key.toLowerCase();
 
         // DEBUG SHORTCUT: Shift+Alt+Enter to skip remaining trials
@@ -2028,9 +2040,14 @@ function setupKeyHandler() {
             return;
         }
 
-        // Handle spacebar for start/continue screens
+        // Handle spacebar for start/continue screens. Only swallow the key
+        // while the task is on screen (stops page scrolling mid-trial); once
+        // Qualtrics moves to another page the exp-container is gone and the
+        // spacebar behaves normally.
         if (key === ' ' || event.code === 'Space') {
-            event.preventDefault();
+            if (document.getElementById('exp-container')) {
+                event.preventDefault();
+            }
             if (ExperimentState.waitingForStart) {
                 ExperimentState.waitingForStart = false;
                 const cb = ExperimentState.spaceCallback;
