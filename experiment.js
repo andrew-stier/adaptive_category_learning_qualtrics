@@ -9,6 +9,7 @@
  * points_training_trials, points_mastery_bonus, points_training,
  * points_transfer, transfer_old_accuracy, points_total, bonus_usd.
  * Bump experiment.js cache-buster in Qualtrics to ?v=6.
+ * v6.1 (2026-10-07): training break screens show only mastery progress + SPACEBAR.
  *
  * v5 (2026-04-27) — randomize ADO selection over top-K eligible items
  * (K=4) instead of strict argmax, and bump anti-recent K from 6 to 12. Fixes
@@ -1358,11 +1359,8 @@ function endTrainingBlock() {
 
     // Mastery bonus drops at the end of every block, before any claim, so the
     // claimed amount = masteryBonusStart − dropPerBlock × blocks completed.
-    const blockCorrectCount = ExperimentState.blockCorrect;
-    let bonusBefore = null;
     if (pointsEnabled()) {
         const p = ExperimentState.points;
-        bonusBefore = p.masteryBonus;
         p.masteryBonus = Math.max(0, p.masteryBonus - CONFIG.points.masteryBonusDropPerBlock);
     }
 
@@ -1400,7 +1398,7 @@ function endTrainingBlock() {
 
     // Show break screen or continue immediately
     if (CONFIG.training.breakBetweenBlocks && pointsEnabled()) {
-        showTrainingPointsBreak(blockCorrectCount, bonusBefore);
+        showTrainingPointsBreak();
     } else if (CONFIG.training.breakBetweenBlocks) {
         showBlockBreak();
     } else {
@@ -1433,22 +1431,16 @@ function showBlockBreak() {
     ExperimentState.waitingForStart = true;
 }
 
-function showTrainingPointsBreak(blockCorrectCount, bonusBefore) {
-    const p = ExperimentState.points;
-    const completedBlock = ExperimentState.blockNum;   // already incremented → 1-indexed count of completed blocks
+function showTrainingPointsBreak() {
+    // Kept minimal on purpose: points and mastery bonus are already visible
+    // in the live points bar during trials.
     const dots = CONFIG.points.showMasteryProgress
-        ? `<div style="margin-bottom: 14px;">Mastery progress: <span class="mastery-dots">${masteryProgressDots()}</span></div>`
+        ? `<div style="margin-bottom: 20px;">Mastery progress: <span class="mastery-dots">${masteryProgressDots()}</span></div>`
         : '';
     showSpacebarScreen(`
         <span class="fixation">+</span>
         <div class="start-prompt">
-            <div style="margin-bottom: 10px;">Block ${completedBlock} complete: ${blockCorrectCount}/${CONFIG.training.trialsPerBlock} correct</div>
-            <table class="points-summary">
-                <tr><td>Points</td><td class="num">${p.trialPoints}</td></tr>
-                <tr><td>Mastery bonus</td><td class="num">${bonusBefore} &rarr; ${p.masteryBonus}</td></tr>
-            </table>
             ${dots}
-            <div style="margin-bottom: 20px;">Master the categories to claim your bonus.<br>It drops by ${CONFIG.points.masteryBonusDropPerBlock} after every block.</div>
             Press <strong>SPACEBAR</strong> to continue
         </div>
     `);
