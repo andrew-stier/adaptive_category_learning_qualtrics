@@ -10,6 +10,8 @@
  * points_transfer, transfer_old_accuracy, points_total, bonus_usd.
  * Bump experiment.js cache-buster in Qualtrics to ?v=6.
  * v6.1 (2026-10-07): training break screens show only mastery progress + SPACEBAR.
+ * v6.2 (2026-10-07): transfer RT < 100 ms → "Too fast!" warning; trial logged with
+ *   tooFast=true, excluded from α update, counted wrong if a scored old item.
  *
  * v5 (2026-04-27) — randomize ADO selection over top-K eligible items
  * (K=4) instead of strict argmax, and bump anti-recent K from 6 to 12. Fixes
@@ -124,7 +126,10 @@ const CONFIG = {
         timeoutExtraITI: 1000,            // Extra ITI after timeout (ms)
         stimulusDuration: null,
         maxResponseTime: 5000,
-        adaptiveSelection: true,          // Online ADO: pick max-IG item at each trial based on current α posterior
+        tooFastMs: 100,                   // RT below this → "Too fast!" warning; trial logged with tooFast=true,
+                                          //   excluded from α update, and counted wrong if an old (scored) item. 0 disables.
+        tooFastWarningDuration: 1000,     // ms the "Too fast!" message stays up (plus timeoutExtraITI)
+        adaptiveSelection: true,         // Online ADO: pick max-IG item at each trial based on current α posterior
         minSpacing: 3,                    // Minimum items between repeats of same stimulus (for offline schedule fallback)
         minPresentations: 2,              // Minimum presentations per item (offline schedule only)
         maxPresentations: 8,              // Maximum presentations per item (offline schedule only)
@@ -1700,23 +1705,26 @@ function handleTransferResponse(itemId, response, rt, confidence) {
     }
 
     const timeout = response === -1;
+    // Anticipatory responses (faster than anyone can perceive the stimulus)
+    const tooFast = !timeout && CONFIG.transfer.tooFastMs > 0 && rt < CONFIG.transfer.tooFastMs;
 
     // Update alpha belief if valid response. Belief update uses the BINARY
     // category portion only — confidence is recorded for richer post-hoc
     // analysis (ordered-probit) but doesn't change runtime ADO.
-    if (!timeout) {
+    if (!timeout && !tooFast) {
         updateAlphaBelief(itemId, response);
     }
 
     // Get item metadata
     const item = ExperimentState.lookupTables.transfer_items.find(t => t.id === itemId);
 
-    // Hidden points: only OLD items (known category) are scored, timeouts
-    // count as wrong, confidence is ignored. Novel items are never scored.
+    // Hidden points: only OLD items (known category) are scored, timeouts and
+    // too-fast responses count as wrong, confidence is ignored. Novel items
+    // are never scored.
     let oldCorrect = null;
     if (pointsEnabled() && ExperimentState.points && ExperimentState.oldItemCategory &&
         ExperimentState.oldItemCategory[itemId] !== undefined) {
-        oldCorrect = !timeout && response === ExperimentState.oldItemCategory[itemId];
+        oldCorrect = !timeout && !tooFast && response === ExperimentState.oldItemCategory[itemId];
         ExperimentState.points.transferOldN += 1;
         if (oldCorrect) ExperimentState.points.transferOldCorrect += 1;
     }
@@ -1731,6 +1739,7 @@ function handleTransferResponse(itemId, response, rt, confidence) {
         response: response,
         confidence: (typeof confidence === "number") ? confidence : null,
         timeout: timeout,
+        tooFast: tooFast,
         rt: rt,
         alphaBelief: [...ExperimentState.alphaBelief],
         informationGain: computeInformationGain(itemId),
@@ -1747,20 +1756,38 @@ function handleTransferResponse(itemId, response, rt, confidence) {
                        trialsCompleted % breakFreq === 0 &&
                        trialsCompleted < CONFIG.transfer.totalTrials;
 
-    if (needsBreak) {
-        // Show break screen
-        showFixation();
-        setTimeout(() => {
-            showTransferBreak();
-        }, CONFIG.transfer.itiDuration);
-    } else {
-        // Continue to next trial (no feedback in transfer, extra ITI if timeout)
-        const itiDuration = timeout
-            ? CONFIG.transfer.itiDuration + CONFIG.transfer.timeoutExtraITI
-            : CONFIG.transfer.itiDuration;
+    const proceed = () => {
+        if (needsBreak) {
+            // Show break screen
+            showFixation();
+            setTimeout(() => {
+                showTransferBreak();
+            }, CONFIG.transfer.itiDuration);
+        } else {
+            // Continue to next trial (no feedback in transfer, extra ITI if timeout / too fast)
+            const itiDuration = (timeout || tooFast)
+                ? CONFIG.transfer.itiDuration + CONFIG.transfer.timeoutExtraITI
+                : CONFIG.transfer.itiDuration;
 
+            showFixation();
+            setTimeout(runTransferTrial, itiDuration);
+        }
+    };
+
+    if (tooFast) {
+        // Speed warning only — says nothing about correctness
         showFixation();
-        setTimeout(runTransferTrial, itiDuration);
+        const feedbackDiv = document.getElementById("feedback");
+        if (feedbackDiv) {
+            feedbackDiv.textContent = "Too fast! Look at each alien before answering.";
+            feedbackDiv.className = "feedback timeout";
+        }
+        setTimeout(() => {
+            clearFeedback();
+            proceed();
+        }, CONFIG.transfer.tooFastWarningDuration);
+    } else {
+        proceed();
     }
 }
 
