@@ -16,6 +16,8 @@
  *   task and swallowed SPACEBAR in every later text box ("Everythingworkswell").
  *   Now ignores keys typed in inputs/textareas and only blocks SPACEBAR while
  *   the task is on screen. Use cache-buster ?v=7 on all three task questions.
+ * v7.1 (2026-10-08): label swap disabled — E = Vekki, I = Boula for everyone,
+ *   matching the instruction pages. Condition codes now always end in _L0.
  *
  * v5 (2026-04-27) — randomize ADO selection over top-K eligible items
  * (K=4) instead of strict argmax, and bump anti-recent K from 6 to 12. Fixes
@@ -292,8 +294,12 @@ function generateCounterbalance(participantId) {
         rng() > 0.5
     ];
 
-    // Randomly swap category labels
-    const labelSwap = rng() > 0.5;
+    // Label swap disabled (v7.1): the static instruction pages say E = Vekki /
+    // I = Boula, so a swap contradicted them for ~half of participants (and
+    // doubled the near-chance rate). Draw is kept so the RNG sequence and all
+    // other counterbalancing stay identical to earlier versions.
+    rng();
+    const labelSwap = false;
 
     // Create a condition code for logging
     const conditionCode = `D${dimensionOrder.join('')}_P${polarityFlips.map(p => p ? 1 : 0).join('')}_L${labelSwap ? 1 : 0}`;
